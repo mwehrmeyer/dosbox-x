@@ -1997,7 +1997,7 @@ bool ParseCommand(char* str) {
 			return false;
 		}
 
-		fprintf(f, "g%X = {\n", offset);
+		fprintf(f, "Dump of char array at %X\n", offset);
 
 		uint32_t stringLength;
 		uint32_t charPointerCounter = 0;
@@ -2024,14 +2024,12 @@ bool ParseCommand(char* str) {
 				stringLength++;
 			}
 
-			fprintf(f,"\t[%s]\t\t/* %X */\n", destinationString.c_str(), ptrAddress);
-			// LOG_MSG("%X: [%s]", charPointerOffset, destinationString.c_str());
+			fprintf(f,"%04u: [%s]\n", charPointerCounter, destinationString.c_str());
 
 			charPointerCounter++;
 			charPointerOffset += 4;
 		}
 
-		fprintf(f, "}\n");
 		fflush(f);
 		fclose(f);
 
