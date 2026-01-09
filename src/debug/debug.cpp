@@ -1982,6 +1982,63 @@ bool ParseCommand(char* str) {
 		return true;
 	}
 
+	if (command == "DCA") {
+		uint16_t seg = (uint16_t)GetHexValue(found,found); found++;
+		uint32_t offset = GetHexValue(found,found); found++;
+
+		if (offset % 4 != 0) {
+			LOG_MSG("Offset should probably be aligned to 4");
+			return false;
+		}
+
+		FILE* f = fopen("CHAR_ARRAY.TXT","wt");
+		if (!f) {
+			DEBUG_ShowMsg("DEBUG: Memory dump failed.\n");
+			return false;
+		}
+
+		fprintf(f, "g%X = {\n", offset);
+
+		uint32_t stringLength;
+		uint32_t charPointerCounter = 0;
+		uint32_t charPointerOffset = offset;
+		while (true) {
+			uint32_t ptrAddress;
+			if (mem_readd_checked((PhysPt)GetAddress(seg,charPointerOffset),&ptrAddress)) break;
+
+			if (ptrAddress == 0) break;
+
+			std::string destinationString;
+			stringLength = 0;
+			while (true) {
+				char currentChar;
+				uint8_t currentUint8;
+				if (mem_readb_checked((PhysPt)GetAddress(seg,ptrAddress + stringLength),&currentUint8)) break;
+
+				currentChar = static_cast<char>(currentUint8);
+				if (currentChar == '\0') {
+					break;
+				}
+
+				destinationString.push_back(currentChar);
+				stringLength++;
+			}
+
+			fprintf(f,"\t[%s]\t\t/* %X */\n", destinationString.c_str(), ptrAddress);
+			// LOG_MSG("%X: [%s]", charPointerOffset, destinationString.c_str());
+
+			charPointerCounter++;
+			charPointerOffset += 4;
+		}
+
+		fprintf(f, "}\n");
+		fflush(f);
+		fclose(f);
+
+		LOG_MSG("Read %d strings from %04X:%X", charPointerCounter, seg, offset);
+		return true;
+	}
+
 	if (command == "MEMDUMPBIN") { // Dump memory to file binary
 		uint16_t seg = (uint16_t)GetHexValue(found,found); found++;
 		uint32_t ofs = GetHexValue(found,found); found++;
