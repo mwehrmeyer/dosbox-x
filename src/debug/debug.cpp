@@ -2074,6 +2074,51 @@ bool ParseCommand(char* str) {
 		return true;
 	}
 
+	if (command == "DUMPSF") {
+		uint16_t seg = (uint16_t)GetHexValue(found,found); found++;
+		uint32_t ofs = GetHexValue(found,found); found++;
+
+		string s;
+		uint32_t stringLength = 0;
+
+		while (true) {
+			uint8_t byte;
+			if (mem_readb_checked((PhysPt)GetAddress(seg,ofs + stringLength),&byte)) break;
+
+			if (byte == 0) {
+				break;
+			}
+
+			char c = static_cast<char>(byte);
+			s.push_back(c);
+
+			stringLength++;
+		}
+
+		if (stringLength == 0) {
+			LOG_MSG("String at %X:%X has length 0", seg, ofs);
+			return false;
+		}
+
+
+		char filename[0x20];
+		snprintf(filename,0x20,"%X.txt",ofs);
+
+		FILE* f = fopen(filename,"wt");
+		if (!f) {
+			DEBUG_ShowMsg("DEBUG: String dump failed.\n");
+			return false;
+		}
+
+		fprintf(f, "%s", s.c_str());
+
+		fclose(f);
+
+		LOG_MSG("Wrote string of length %u from %X:%X to %s", stringLength, seg, ofs, filename);
+
+		return true;
+	}
+
 	if (command == "MEMDUMPBIN") { // Dump memory to file binary
 		uint16_t seg = (uint16_t)GetHexValue(found,found); found++;
 		uint32_t ofs = GetHexValue(found,found); found++;
