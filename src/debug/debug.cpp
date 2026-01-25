@@ -2119,6 +2119,28 @@ bool ParseCommand(char* str) {
 		return true;
 	}
 
+	if (command == "DRP4") {
+		// De-references a four-byte pointer and displays it in data view. Also kind of funny.
+		uint32_t ptr;
+
+		uint16_t seg = (uint16_t)GetHexValue(found,found); found++;
+		uint32_t ofs = GetHexValue(found,found); found++;
+
+		bool memReadHasFailed = mem_readd_checked((PhysPt)GetAddress(seg,ofs), &ptr);
+
+		if (memReadHasFailed) {
+			DEBUG_ShowMsg("DEBUG: Could not read offset from %04X:%04X\n",seg,ofs);
+			return false;
+		}
+
+		dataSeg = seg;
+		dataOfs = ptr;
+
+		dbg.set_data_view(DBGBlock::DATV_SEGMENTED);
+		DEBUG_ShowMsg("DEBUG: DRP4 has set data overview to %04X:%04X\n",dataSeg,dataOfs);
+		return true;
+	}
+
 	if (command == "MEMDUMPBIN") { // Dump memory to file binary
 		uint16_t seg = (uint16_t)GetHexValue(found,found); found++;
 		uint32_t ofs = GetHexValue(found,found); found++;
