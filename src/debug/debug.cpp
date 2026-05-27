@@ -2074,6 +2074,28 @@ bool ParseCommand(char* str) {
 		return true;
 	}
 
+	if (command == "DUIA") {
+		uint16_t seg = (uint16_t)GetHexValue(found,found); found++;
+		uint32_t ofs = GetHexValue(found,found); found++;
+
+		uint32_t count = GetHexValue(found,found); found++;
+
+		if (seg == 0 || ofs == 0 || count == 0) return false;
+
+		if (ofs % 4 != 0) {
+			LOG_MSG("Offset should probably be aligned to 4");
+			return false;
+		}
+
+		for (uint32_t i = 0; i < count; i++) {
+			uint32_t arrayContent;
+			if (mem_readd_checked((PhysPt)GetAddress(seg,ofs + i * sizeof(uint32_t)),&arrayContent)) break;
+
+			LOG_MSG("g%08X[%u] = %08X\n", ofs, i, arrayContent);
+		}
+		return true;
+	}
+
 	if (command == "DUMPSF") {
 		uint16_t seg = (uint16_t)GetHexValue(found,found); found++;
 		uint32_t ofs = GetHexValue(found,found); found++;
