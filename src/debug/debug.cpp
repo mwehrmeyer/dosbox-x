@@ -2080,11 +2080,14 @@ bool ParseCommand(char* str) {
 
 		uint32_t count = GetHexValue(found,found); found++;
 
-		if (seg == 0 || ofs == 0 || count == 0) return false;
+		if (seg == 0 || ofs == 0 || count == 0) {
+			LOG_MSG("Usage: DUIA seg:off count");
+			return true;
+		}
 
 		if (ofs % 4 != 0) {
 			LOG_MSG("Offset should probably be aligned to 4");
-			return false;
+			return true;
 		}
 
 		for (uint32_t i = 0; i < count; i++) {
