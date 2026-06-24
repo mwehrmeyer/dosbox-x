@@ -24,6 +24,7 @@
 
 #include <string.h>
 #include <list>
+#include <map>
 #include <vector>
 #include <ctype.h>
 #include <fstream>
@@ -269,6 +270,7 @@ enum {
 char* AnalyzeInstruction(char* inst, bool saveSelector);
 uint32_t GetHexValue(char* const str, char* &hex,bool *parsed=NULL,int exprge=EXPR_BASE);
 void SkipSpace(char*& hex);
+bool ParseCommand(char* str); /* needed by scriptpoints, which run debugger commands automatically */
 
 #if 0
 class DebugPageHandler : public PageHandler {
@@ -573,7 +575,7 @@ std::vector<CDebugVar*> CDebugVar::varList;
 bool mustCompleteInstruction = false;
 bool skipFirstInstruction = false;
 
-enum EBreakpoint { BKPNT_UNKNOWN, BKPNT_PHYSICAL, BKPNT_INTERRUPT, BKPNT_MEMORY, BKPNT_MEMORY_PROT, BKPNT_MEMORY_LINEAR, BKPNT_MEMORY_FREEZE };
+enum EBreakpoint { BKPNT_UNKNOWN, BKPNT_PHYSICAL, BKPNT_INTERRUPT, BKPNT_MEMORY, BKPNT_MEMORY_PROT, BKPNT_MEMORY_LINEAR, BKPNT_MEMORY_FREEZE, BKPNT_SCRIPT, BKPNT_NATIVE };
 
 #define BPINT_ALL 0x100
 
@@ -588,7 +590,8 @@ public:
 	void					SetOnce			(bool _once)				{ once = _once; };
 	void					SetType			(EBreakpoint _type)			{ type = _type; };
 	void					SetValue		(uint8_t value)				{ ahValue = value; };
-	void					SetOther		(uint8_t other)				{ alValue = other; };	
+	void					SetOther		(uint8_t other)				{ alValue = other; };
+	void					SetScriptFile	(const std::string& f)		{ scriptFile = f; };
 
 	bool					IsActive		(void)						{ return active; };
 	void					Activate		(bool _active);
@@ -601,11 +604,18 @@ public:
 	uint8_t					GetIntNr		(void)						{ return intNr; };
 	uint16_t					GetValue		(void)						{ return ahValue; };
 	uint16_t					GetOther		(void)						{ return alValue; };
+	const std::string&		GetScriptFile	(void)						{ return scriptFile; };
 
 	// statics
 	static CBreakpoint*		AddBreakpoint		(uint16_t seg, uint32_t off, bool once);
 	static CBreakpoint*		AddIntBreakpoint	(uint8_t intNum, uint16_t ah, uint16_t al, bool once);
 	static CBreakpoint*		AddMemBreakpoint	(uint16_t seg, uint32_t off);
+	static CBreakpoint*		AddScriptPoint		(uint16_t seg, uint32_t off, const std::string& file);
+	static CBreakpoint*		AddNativePoint		(uint16_t seg, uint32_t off, const std::string& callbackName);
+	static void				RunScriptPoints		(uint16_t seg, uint32_t off);
+	static std::string		AssetDir			(void);	// ~/dosbox-x-debugger-assets/
+	static std::string		ScriptDir			(void);	// AssetDir()/scripts/
+	static std::string		BreakpointListDir   (void); // AssetDir()/breakpoints/
 	static void				DeactivateBreakpoints();
 	static void				ActivateBreakpoints	();
 	static void				ActivateBreakpointsExceptAt(PhysPt adr);
@@ -633,6 +643,8 @@ private:
 	uint8_t		intNr;
 	uint16_t		ahValue;
 	uint16_t		alValue;
+	// Script: path of the command file, relative to ~/dosbox-x-commands/
+	std::string	scriptFile;
 	// Shared
 	bool		active;
 	bool		once;
@@ -718,6 +730,139 @@ CBreakpoint* CBreakpoint::AddMemBreakpoint(uint16_t seg, uint32_t off)
 	bp->SetType			(BKPNT_MEMORY);
 	BPoints.push_front	(bp);
 	return bp;
+}
+
+// Base directory holding scriptpoint command files. Configurable via the
+// "debugger command directory" option in the [dosbox] config section; defaults
+// to ~/dosbox-x-debugger-assets/. A leading ~ is expanded to the user's home directory.
+std::string CBreakpoint::AssetDir(void)
+{
+	std::string dir;
+	Section_prop *sec = static_cast<Section_prop *>(control->GetSection("dosbox"));
+	if (sec) dir = sec->Get_string("debugger assets directory");
+	if (dir.empty()) dir = "~/dosbox-x-debugger";
+
+	Cross::ResolveHomedir(dir);	// expand a leading ~ / ~user
+	if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') dir += CROSS_FILESPLIT;
+	return dir;
+}
+
+std::string CBreakpoint::ScriptDir(void)
+{
+	return AssetDir() + "scripts" + CROSS_FILESPLIT;
+}
+
+std::string CBreakpoint::BreakpointListDir(void)
+{
+	return AssetDir() + "breakpoints" + CROSS_FILESPLIT;
+}
+
+// ---- Compiled-in breakpoint callbacks (the RUNC command) -------------------------------
+// Registry of named C++ functions that can be bound to an instruction address. Names are
+// matched case-insensitively (stored upper-cased, because the command parser upper-cases
+// its input). See debug_user_callbacks.h for where user callbacks are registered.
+static std::map<std::string, DEBUG_ScriptCallback>& DebugCallbacks(void)
+{
+	static std::map<std::string, DEBUG_ScriptCallback> registry;
+	return registry;
+}
+
+static std::string DebugUpper(const std::string& s)
+{
+	std::string r(s);
+	for (auto& c : r) c = (char)ncurses_aware_toupper((unsigned char)c);
+	return r;
+}
+
+void DEBUG_RegisterCallback(const char* name, DEBUG_ScriptCallback fn)
+{
+	if (name && fn) DebugCallbacks()[DebugUpper(name)] = fn;
+}
+
+static DEBUG_ScriptCallback DebugFindCallback(const std::string& nameUpper)
+{
+	auto it = DebugCallbacks().find(nameUpper);
+	return (it == DebugCallbacks().end()) ? nullptr : it->second;
+}
+
+static std::string DebugCallbackNames(void)
+{
+	std::string out;
+	for (auto& kv : DebugCallbacks()) { if (!out.empty()) out += ", "; out += kv.first; }
+	return out.empty() ? "(none)" : out;
+}
+
+CBreakpoint* CBreakpoint::AddScriptPoint(uint16_t seg, uint32_t off, const std::string& file)
+{
+	CBreakpoint* bp = new CBreakpoint();
+	bp->SetAddress		(seg,off);		// also sets type to BKPNT_PHYSICAL and stores seg/off
+	bp->SetType			(BKPNT_SCRIPT);
+	bp->SetOnce			(false);
+	bp->SetScriptFile	(file);
+	bp->Activate		(true);
+	BPoints.push_front	(bp);
+	return bp;
+}
+
+CBreakpoint* CBreakpoint::AddNativePoint(uint16_t seg, uint32_t off, const std::string& callbackName)
+{
+	CBreakpoint* bp = new CBreakpoint();
+	bp->SetAddress		(seg,off);
+	bp->SetType			(BKPNT_NATIVE);
+	bp->SetOnce			(false);
+	bp->SetScriptFile	(callbackName);	// re-use the script-file field to hold the callback name
+	bp->Activate		(true);
+	BPoints.push_front	(bp);
+	return bp;
+}
+
+// For every scriptpoint at the given address, run its action, then let execution continue
+// (scriptpoints never stop the emulator). Two kinds exist:
+//   BKPNT_SCRIPT  - (re-)read a command file from disk and run each line as a debugger
+//                   command. The file is read fresh on every hit, so edits take effect
+//                   without restarting dosbox-x.
+//   BKPNT_NATIVE  - call a compiled-in C++ callback (registered via DEBUG_RegisterCallback).
+void CBreakpoint::RunScriptPoints(uint16_t seg, uint32_t off)
+{
+	if (BPoints.empty()) return;
+
+	const PhysPt addr = (PhysPt)GetAddress(seg, off);
+
+	// Collect actions first, so a command/callback that edits the breakpoint list
+	// (e.g. BPDEL) cannot invalidate the iterator while we run it.
+	struct Pending { EBreakpoint type; std::string payload; };
+	std::list<Pending> pending;
+	for (auto i = BPoints.begin(); i != BPoints.end(); ++i) {
+		CBreakpoint* bp = (*i);
+		if (!bp->IsActive() || bp->GetLocation() != addr) continue;
+		if (bp->GetType() == BKPNT_SCRIPT || bp->GetType() == BKPNT_NATIVE)
+			pending.push_back({ bp->GetType(), bp->GetScriptFile() });
+	}
+
+	for (auto& p : pending) {
+		if (p.type == BKPNT_NATIVE) {
+			DEBUG_ScriptCallback fn = DebugFindCallback(p.payload);
+			if (fn) fn(seg, off);	// missing callback: silently skip (rejected at creation time)
+			continue;
+		}
+
+		std::ifstream in((ScriptDir() + p.payload).c_str());
+		if (!in) continue;	// missing/unreadable file: silently skip (warned at creation time)
+
+		std::string line;
+		while (std::getline(in, line)) {
+			// trim surrounding whitespace (incl. stray CR from CRLF files)
+			std::string::size_type b = line.find_first_not_of(" \t\r\n");
+			std::string::size_type e = line.find_last_not_of(" \t\r\n");
+			if (b == std::string::npos) continue;			// blank line
+			line = line.substr(b, e - b + 1);
+			if (line[0] == '#' || line[0] == ';') continue;	// comment line
+
+			std::vector<char> buf(line.begin(), line.end());
+			buf.push_back('\0');
+			ParseCommand(buf.data());	// ParseCommand copies the buffer, never writes to it
+		}
+	}
 }
 
 void CBreakpoint::ActivateBreakpoints()
@@ -951,6 +1096,10 @@ void CBreakpoint::ShowList(void)
 			DEBUG_ShowMsg("%02X. BPLM %08X (%02X)\n",nr,bp->GetOffset(),bp->GetValue());
         } else if (bp->GetType()==BKPNT_MEMORY_FREEZE ) {
 	        DEBUG_ShowMsg("%02X. FM %08X (%02X)\n",nr,bp->GetOffset(),bp->GetValue());
+		} else if (bp->GetType()==BKPNT_SCRIPT ) {
+			DEBUG_ShowMsg("%02X. RUNAT %04X:%04X -> %s\n",nr,bp->GetSegment(),bp->GetOffset(),bp->GetScriptFile().c_str());
+		} else if (bp->GetType()==BKPNT_NATIVE ) {
+			DEBUG_ShowMsg("%02X. RUNC %04X:%04X -> %s()\n",nr,bp->GetSegment(),bp->GetOffset(),bp->GetScriptFile().c_str());
 		}
 		nr++;
 	}
@@ -1738,6 +1887,35 @@ uint32_t GetHexValue(char* const str, char* &hex,bool *parsed,int exprge)
     return regval;
 }
 
+char *const GetNextWord(char* &string) {
+	auto originalString = string;
+	if (*string == '\0') {
+		// no new word
+		return nullptr;
+	}
+
+	// string = " " || string = " abc"
+	// we are not at the end of the string
+	while (*string && isspace(*string)) {
+		string++;
+	}
+
+	// if this condition matches, there were only whitespace characters left in the string
+	if (*string == '\0') {
+		// no new word
+		return nullptr;
+	}
+
+	// we have some non-space characters left
+	auto wordStart = string;
+
+	while (*string && !isspace(*string)) {
+		string++;
+	}
+
+	return wordStart;
+}
+
 bool ChangeRegister(char* const str)
 {
 	char* hex = str;
@@ -1949,7 +2127,7 @@ bool ParseCommand(char* str) {
 	(s_found.erase)(0,next);
 	found = const_cast<char*>(s_found.c_str());
 
-    if (command == "QUIT") {
+    if (command == "QUIT" || command == "Q" || command == "EXIT" || command == "X") {
         void DoKillSwitch(void);
         DoKillSwitch();
         return true;
@@ -2723,6 +2901,123 @@ bool ParseCommand(char* str) {
 		CBreakpoint* bp = CBreakpoint::AddMemBreakpoint(0,ofs);
 		if (bp) bp->SetType(BKPNT_MEMORY_LINEAR);
 		DEBUG_ShowMsg("DEBUG: Set linear memory breakpoint at %08X\n",ofs);
+		return true;
+	}
+
+	if (command == "RUNAT") { // Run a command file whenever an instruction is executed
+		// RUNAT seg:off <file relative to ~/dosbox-x-commands/>
+		uint16_t seg = (uint16_t)GetHexValue(found,found); found++; // skip ":"
+		uint32_t ofs = GetHexValue(found,found);
+
+		// Re-extract the file name from the ORIGINAL (non-upper-cased) input: ParseCommand
+		// upper-cases its working copy, but file paths are case-sensitive. Tokens are
+		// [RUNAT] [seg:off] [file...]; skip the first two then take the rest.
+		const char* p = str;
+		for (int tok = 0; tok < 2; tok++) {
+			while (*p && isspace((unsigned char)*p)) p++;	// leading whitespace
+			while (*p && !isspace((unsigned char)*p)) p++;	// the token itself
+		}
+		while (*p && isspace((unsigned char)*p)) p++;		// whitespace before file name
+
+		std::string file = p;
+		while (!file.empty() && isspace((unsigned char)file.back())) file.pop_back();
+
+		if (file.empty()) {
+			LOG_MSG("Usage: RUNAT seg:off <file relative to ~/dosbox-x-commands/>");
+			return true;
+		}
+
+		CBreakpoint::AddScriptPoint(seg,ofs,file);
+
+		const std::string full = CBreakpoint::ScriptDir() + file;
+		DEBUG_ShowMsg("DEBUG: Set scriptpoint at %04X:%04X -> %s\n",seg,ofs,file.c_str());
+		{
+			std::ifstream test(full.c_str());
+			if (!test) DEBUG_ShowMsg("DEBUG: NOTE: '%s' does not exist yet; create it before the breakpoint is hit.\n",full.c_str());
+		}
+		DEBUG_ShowMsg("DEBUG: File is re-read on every hit. Remove it like any breakpoint with BPDEL (see BPLIST).\n");
+		return true;
+	}
+
+	if (command == "RUNC") { // Run a compiled-in callback whenever an instruction is executed
+		// RUNC seg:off <callback name>
+		uint16_t seg = (uint16_t)GetHexValue(found,found); found++; // skip ":"
+		uint32_t ofs = GetHexValue(found,found);
+
+		std::string name = trim(found);	// already upper-cased by ParseCommand; lookup is case-insensitive
+		if (name.empty()) {
+			LOG_MSG("Usage: RUNC seg:off <callback name>   (known: %s)",DebugCallbackNames().c_str());
+			return true;
+		}
+
+		// Callbacks are compiled in and registered at startup: if the name is unknown now,
+		// it will never appear, so reject instead of creating a breakpoint that never fires.
+		if (!DebugFindCallback(name)) {
+			DEBUG_ShowMsg("DEBUG: No compiled callback named '%s'. Known callbacks: %s\n",name.c_str(),DebugCallbackNames().c_str());
+			return true;
+		}
+
+		CBreakpoint::AddNativePoint(seg,ofs,name);
+		DEBUG_ShowMsg("DEBUG: Set native scriptpoint at %04X:%04X -> %s()\n",seg,ofs,name.c_str());
+		DEBUG_ShowMsg("DEBUG: Remove it like any breakpoint with BPDEL (see BPLIST).\n");
+		return true;
+	}
+
+	if (command == "RUNCLIST") { // List registered compiled-in callbacks
+		DEBUG_ShowMsg("Registered RUNC callbacks: %s\n",DebugCallbackNames().c_str());
+		return true;
+	}
+
+	if (command == "GENBP") { // GENBP <file> <address>
+		// Parse two whitespace-separated tokens from the ORIGINAL (non-upper-cased) input,
+		// so the file name keeps its case (ParseCommand upper-cases its working copy).
+		// Tokens are [GENBP] [file] [address].
+
+		auto filename = GetNextWord(found);
+		if (!filename) {
+			LOG_MSG("DEBUG: GENBP takes two arguments: <file> <address>\n");
+			return true;
+		}
+
+		// we could only have one word on the command line, and in that case, we should abort
+		if (*found == '\0') {
+			LOG_MSG("DEBUG: GENBP takes two arguments: <file> <address>\n");
+			return true;
+		}
+
+		*found = '\0';
+		found++;
+
+		auto rawAddress = GetNextWord(found);
+		if (!rawAddress) {
+			LOG_MSG("DEBUG: GENBP takes two arguments: <file> <address>\n");
+			return true;
+		}
+
+		if (*found) {
+			LOG_MSG("DEBUG: GENBP takes exactly two arguments: <file> <address>\n");
+			return true;
+		}
+
+		for (char *current = filename; *current; current++) {
+			*current = tolower(*current);
+		}
+
+		auto bpFile = CBreakpoint::BreakpointListDir() + filename;
+		LOG_MSG("DEBUG: GENBP looks for file \"%s\"\n", bpFile.c_str());
+
+		std::ifstream file(bpFile.c_str());
+
+		if (!file) {
+			std::cerr << "Failed to open file " + bpFile + "\n";
+			return true;
+		}
+
+		std::string line;
+		while (std::getline(file, line)) {
+			// Process line here
+		}
+
 		return true;
 	}
 
@@ -5976,7 +6271,13 @@ void DBGBlock::set_data_view(unsigned int view) {
     }
 }
 
+#include "debug_user_callbacks.h"	// user-editable compiled-in RUNC callbacks (see file header)
+
 void DEBUG_SetupConsole(void) {
+	// Register compiled-in breakpoint callbacks once, so RUNC / RUNCLIST can find them.
+	static bool callbacksRegistered = false;
+	if (!callbacksRegistered) { DEBUG_RegisterUserCallbacks(); callbacksRegistered = true; }
+
 	if (dbg.win_main == NULL) {
         LOG(LOG_MISC, LOG_DEBUG)("DEBUG_SetupConsole initializing GUI");
 
@@ -6398,6 +6699,8 @@ bool DEBUG_HeavyIsBreakpoint(void) {
 		skipFirstInstruction = false;
 		return false;
 	}
+	// Run any scriptpoints at this address (they execute commands and keep running).
+	CBreakpoint::RunScriptPoints(SegValue(cs),reg_eip);
 	if (!CBreakpoint::BPoints.empty() && CBreakpoint::CheckBreakpoint(SegValue(cs),reg_eip)) {
 		return true;
 	}

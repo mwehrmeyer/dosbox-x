@@ -26,6 +26,14 @@ bool DEBUG_ExitLoop(void);
 void DEBUG_RefreshPage(char scroll);
 Bitu DEBUG_EnableDebugger(void);
 
+/* Compiled-in breakpoint callbacks: a function bound to an instruction address via the
+ * debugger "RUNC" command. When the CPU reaches that address the function is called with
+ * the current code segment and offset, then execution continues. Register a callback (by
+ * name, matched case-insensitively) with DEBUG_RegisterCallback; the callback has full
+ * access to registers, memory, logging and ParseCommand, just like any other debugger code. */
+typedef void (*DEBUG_ScriptCallback)(uint16_t seg, uint32_t off);
+void DEBUG_RegisterCallback(const char* name, DEBUG_ScriptCallback fn);
+
 extern Bitu cycle_count;
 extern Bitu debugCallback;
 

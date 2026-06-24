@@ -1644,6 +1644,14 @@ void DOSBOX_SetupConfigSections(void) {
     Pstring->Set_help("Additional text to place in the title bar of the window.");
     Pstring->SetBasic(true);
 
+#if C_DEBUG
+    Pstring = secprop->Add_string("debugger command directory",Property::Changeable::Always,"~/dosbox-x-commands");
+    Pstring->Set_help("Directory the debugger's RUNAT scriptpoints read their command files from.\n"
+                      "The file given to RUNAT is resolved relative to this directory and re-read on\n"
+                      "every hit, so script edits take effect without restarting DOSBox-X.\n"
+                      "A leading ~ is expanded to the user's home directory.");
+#endif
+
     Pstring = secprop->Add_string("logo text",Property::Changeable::Always,"");
     Pstring->Set_help("Text to place at the bottom of the screen during the startup logo. Text will line wrap automatically.\n"
                       "To explicitly break to the next line, put \\n in the string.");
