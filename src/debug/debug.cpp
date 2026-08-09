@@ -31,6 +31,7 @@
 #include <iomanip>
 #include <string>
 #include <sstream>
+#include <unordered_map>
 using namespace std;
 
 #include "debug.h"
@@ -48,6 +49,7 @@ using namespace std;
 #include "paging.h"
 #include "shell.h"
 #include "debug_inc.h"
+#include "debug_config.h"
 #include "../cpu/lazyflags.h"
 #include "keyboard.h"
 #include "control.h"
@@ -321,8 +323,14 @@ static int		cpuLogCounter	= 0;
 static int		cpuLogType		= 1;	// log detail
 static bool zeroProtect = false;
 bool	logHeavy	= false;
-#endif
 
+ComponentListContainer componentContainer;
+
+typedef struct ComponentBreakpoint {
+	std::string componentName;
+	uint32_t breakpointAddress;
+} ComponentBreakpoint;
+#endif
 
 
 static struct  {
@@ -478,6 +486,18 @@ uint64_t GetAddress(uint16_t seg, uint32_t offset)
 		return LinMakeProt(seg,offset);
 
 	return ((uint64_t)seg<<4u)+offset;
+}
+
+// Returns true if the linear address for seg:off is currently mapped and
+// readable. Uses the "checked" read path so probing an unmapped address does
+// not raise a CPU exception - an unchecked read there is what locks up the
+// debugger when a breakpoint is placed on unmapped memory. This is a snapshot:
+// under paging the mapping can still change after the breakpoint is set.
+static bool IsDebugAddressMapped(uint16_t seg, uint32_t off)
+{
+	const auto lin = static_cast<LinearPt>(GetAddress(seg, off));
+	uint8_t tmp;
+	return !mem_readb_checked(lin, &tmp); // checked read returns true on fault
 }
 
 static char empty_sel[] = { ' ',' ',0 };
@@ -1887,35 +1907,6 @@ uint32_t GetHexValue(char* const str, char* &hex,bool *parsed,int exprge)
     return regval;
 }
 
-char *const GetNextWord(char* &string) {
-	auto originalString = string;
-	if (*string == '\0') {
-		// no new word
-		return nullptr;
-	}
-
-	// string = " " || string = " abc"
-	// we are not at the end of the string
-	while (*string && isspace(*string)) {
-		string++;
-	}
-
-	// if this condition matches, there were only whitespace characters left in the string
-	if (*string == '\0') {
-		// no new word
-		return nullptr;
-	}
-
-	// we have some non-space characters left
-	auto wordStart = string;
-
-	while (*string && !isspace(*string)) {
-		string++;
-	}
-
-	return wordStart;
-}
-
 bool ChangeRegister(char* const str)
 {
 	char* hex = str;
@@ -2110,6 +2101,20 @@ void AddBPINT3(void) {
 void VGA_DumpFontRamBIN(const char *filename);
 void VGA_DumpFontRamBMP(const char *filename);
 int32_t DEBUG_Run(int32_t amount,bool quickexit);
+
+void createBreakpointFromSegOfs(uint16_t seg, uint32_t ofs) {
+	if (!IsDebugAddressMapped(seg,ofs)) {
+		DEBUG_ShowMsg("DEBUG: %04X:%04X is not mapped - refusing breakpoint (would lock up)\n",seg,ofs);
+		return;
+	}
+	CBreakpoint::AddBreakpoint(seg,ofs,false);
+	DEBUG_ShowMsg("DEBUG: Set breakpoint at %04X:%04X\n",seg,ofs);
+}
+
+void toUpper(std::string &string) {
+	std::transform(string.begin(), string.end(), string.begin(),
+	   [](unsigned char c){ return std::tolower(c); });
+}
 
 bool ParseCommand(char* str) {
     std::string copy_str = str;
@@ -2870,8 +2875,8 @@ bool ParseCommand(char* str) {
 	if (command == "BP") { // Add new breakpoint
 		uint16_t seg = (uint16_t)GetHexValue(found,found);found++; // skip ":"
 		uint32_t ofs = GetHexValue(found,found);
-		CBreakpoint::AddBreakpoint(seg,ofs,false);
-		DEBUG_ShowMsg("DEBUG: Set breakpoint at %04X:%04X\n",seg,ofs);
+
+		createBreakpointFromSegOfs(seg, ofs);
 		return true;
 	}
 
@@ -2901,6 +2906,49 @@ bool ParseCommand(char* str) {
 		CBreakpoint* bp = CBreakpoint::AddMemBreakpoint(0,ofs);
 		if (bp) bp->SetType(BKPNT_MEMORY_LINEAR);
 		DEBUG_ShowMsg("DEBUG: Set linear memory breakpoint at %08X\n",ofs);
+		return true;
+	}
+
+	if (command == "BPC") { // Add new breakpoint for component
+		std::istringstream commandLineStream(found);
+		std::string componentName;
+		std::string offsetString;
+
+		if (!(commandLineStream >> componentName)) {
+			DEBUG_ShowMsg("DEBUG: Usage: BPC <componentName> <breakpoint>\n");
+			return true;
+		}
+
+		auto it = componentContainer.components.find(componentName);
+		if (it == componentContainer.components.end()) {
+			DEBUG_ShowMsg("DEBUG: Usage: Unknown component: %s\n", componentName.c_str());
+			return true;
+		}
+
+		ComponentData &componentData = it->second;
+		if (!componentData.isLoadAddressSet) {
+			DEBUG_ShowMsg("DEBUG: Usage: Component %s not initialized.\n", componentName.c_str());
+			return true;
+		}
+
+		if (!(commandLineStream >> offsetString)) {
+			DEBUG_ShowMsg("DEBUG: Usage: BPC <componentName> <breakpoint>\n");
+			return true;
+		}
+
+		char *end;
+		uint32_t ofs = std::strtoul(offsetString.c_str(), &end, 16);
+
+		if (ofs == 0 && end == offsetString.c_str()) {
+			LOG_MSG("DEBUG: %s is not a hex number\n", offsetString.c_str());
+			return true;
+		}
+
+		auto csValue = SegValue(cs);
+		uint32_t actualBreakpointAddress = componentData.loadAddress + (ofs - componentData.baseAddress);
+		LOG_MSG("Set breakpoint for %s at %X:%X\n", offsetString.c_str(), csValue, actualBreakpointAddress);
+
+		createBreakpointFromSegOfs(csValue, actualBreakpointAddress);
 		return true;
 	}
 
@@ -2958,7 +3006,7 @@ bool ParseCommand(char* str) {
 		}
 
 		CBreakpoint::AddNativePoint(seg,ofs,name);
-		DEBUG_ShowMsg("DEBUG: Set native scriptpoint at %04X:%04X -> %s()\n",seg,ofs,name.c_str());
+		DEBUG_ShowMsg("DEBUG: Set native scriptpoint at %X:%X -> %s()\n",seg,ofs,name.c_str());
 		DEBUG_ShowMsg("DEBUG: Remove it like any breakpoint with BPDEL (see BPLIST).\n");
 		return true;
 	}
@@ -2968,54 +3016,187 @@ bool ParseCommand(char* str) {
 		return true;
 	}
 
-	if (command == "GENBP") { // GENBP <file> <address>
-		// Parse two whitespace-separated tokens from the ORIGINAL (non-upper-cased) input,
-		// so the file name keeps its case (ParseCommand upper-cases its working copy).
-		// Tokens are [GENBP] [file] [address].
+	if (command == "HANDOFF") {
+		Kernel *kernel = &componentContainer.kernel;
+		uint32_t kernelHookOffset = kernel->hookAddress - kernel->baseAddress;
 
-		auto filename = GetNextWord(found);
-		if (!filename) {
-			LOG_MSG("DEBUG: GENBP takes two arguments: <file> <address>\n");
+		uint32_t kernelLoadAddress = reg_eip - kernelHookOffset;
+		if ((kernelLoadAddress & 0xFFF) != 0) {
+			LOG_MSG("DEBUG: Kernel not loaded on page boundary: %08X\n", kernelLoadAddress);
 			return true;
 		}
 
-		// we could only have one word on the command line, and in that case, we should abort
-		if (*found == '\0') {
-			LOG_MSG("DEBUG: GENBP takes two arguments: <file> <address>\n");
+		uint16_t instructionAtCsEip = 0;
+
+		auto csSegValue = SegValue(cs);
+		PhysPt csEip = (PhysPt)GetAddress(csSegValue, reg_eip);
+
+		if (mem_readw_checked(csEip, &instructionAtCsEip)) {
+			DEBUG_ShowMsg("Could not read from %X\n", csEip);
 			return true;
 		}
 
-		*found = '\0';
-		found++;
+		if ((reg_eip & 0xFFF) == kernelHookOffset
+			&& instructionAtCsEip == kernel->hookInstruction
+		    && reg_ax == kernel->axValue) {
 
-		auto rawAddress = GetNextWord(found);
-		if (!rawAddress) {
-			LOG_MSG("DEBUG: GENBP takes two arguments: <file> <address>\n");
+			uint32_t handoffAddressOffset = kernel->handoffAddress - kernel->baseAddress;
+			uint32_t handoffAddress = kernelLoadAddress + handoffAddressOffset;
+
+			CBreakpoint::AddBreakpoint(csSegValue, handoffAddress, false);
+			LOG_MSG("DEBUG: Added Breakpoint %X:%X\n", csSegValue, handoffAddress);
+		}
+
+		return true;
+	}
+
+	if (command == "EBASE") {
+		std::istringstream commandLineStream(found);
+
+		std::string componentName;
+
+		if (!(commandLineStream >> componentName)) {
+			LOG_MSG("DEBUG: COMPONENT BASE <componentName>\n");
 			return true;
 		}
 
-		if (*found) {
-			LOG_MSG("DEBUG: GENBP takes exactly two arguments: <file> <address>\n");
+		auto it = componentContainer.components.find(componentName);
+
+		if (it == componentContainer.components.end()) {
+			LOG_MSG("DEBUG: Unknown component: %s\n", componentName.c_str());
 			return true;
 		}
 
-		for (char *current = filename; *current; current++) {
-			*current = tolower(*current);
+		ComponentData &componentData = it->second;
+		uint32_t loadAddress = reg_eip - (componentData.entryPoint - componentData.baseAddress);
+
+		if ((loadAddress & 0xFFF) != 0) {
+			LOG_MSG("DEBUG: Calculated loadAddress %X for %s, is not allocated on page boundary\n", loadAddress,
+				componentName.c_str());
+			return true;
 		}
 
-		auto bpFile = CBreakpoint::BreakpointListDir() + filename;
+		componentData.loadAddress = loadAddress;
+		componentData.isLoadAddressSet = true;
+		LOG_MSG("DEBUG: Calculated loadAddress %X for %s.\n", loadAddress, componentName.c_str());
+
+		return true;
+	}
+
+	if (command == "COMPONENTS") {
+		for (const auto& entry :componentContainer.components ) {
+			LOG_MSG("DEBUG: %s: { entryPoint = %X, baseAddress = %X, loadAddress = %X }\n",
+				entry.first.c_str(), entry.second.entryPoint, entry.second.baseAddress, entry.second.loadAddress);
+		}
+		return true;
+	}
+
+	if (command == "GENBP") { // GENBP <file>
+		bool hasErrorHappened = false;
+
+		std::istringstream commandLineStream(found);
+		std::vector<ComponentBreakpoint> breakpoints;
+
+		std::string bpFilename;
+
+		if (!(commandLineStream >> bpFilename)) {
+			LOG_MSG("DEBUG: GENBP <file>\n");
+			return true;
+		}
+
+		std::transform(bpFilename.begin(), bpFilename.end(), bpFilename.begin(),
+		   [](unsigned char c){ return std::tolower(c); });
+
+		auto bpFile = CBreakpoint::BreakpointListDir() + bpFilename;
 		LOG_MSG("DEBUG: GENBP looks for file \"%s\"\n", bpFile.c_str());
 
 		std::ifstream file(bpFile.c_str());
 
 		if (!file) {
-			std::cerr << "Failed to open file " + bpFile + "\n";
+			std::cerr << "Failed to open breakpoint file " + bpFile + "\n";
 			return true;
 		}
 
+		if (componentContainer.components.empty()) {
+			file.close();
+			return true;
+		}
+
+		auto csValue = SegValue(cs);
+
 		std::string line;
 		while (std::getline(file, line)) {
-			// Process line here
+			if (line.empty()) {
+				continue;
+			}
+
+			std::istringstream iss(line);
+
+			std::string component;
+			std::string rawBreakpointAddressString;
+
+			if (!(iss >> component)) {
+				LOG_MSG("DEBUG: Malformed breakpoint line %s\n", line.c_str());
+				continue;
+			}
+
+			if (component[0] == '#') {
+				continue;
+			}
+
+			if (!(iss >> rawBreakpointAddressString)) {
+				LOG_MSG("DEBUG: Malformed breakpoint line %s\n", line.c_str());
+				hasErrorHappened = true;
+				continue;
+			}
+
+			std::string uppercaseComponent = component;
+
+			std::transform(uppercaseComponent.begin(), uppercaseComponent.end(), uppercaseComponent.begin(),
+               [](unsigned char c){ return std::toupper(c); });
+
+			auto it = componentContainer.components.find(uppercaseComponent);
+			if (it == componentContainer.components.end()) {
+				LOG_MSG("DEBUG: Unknown component: %s\n", component.c_str());
+				hasErrorHappened = true;
+				continue;
+			}
+
+			ComponentData &componentData = it->second;
+
+			if (!componentData.isLoadAddressSet) {
+				LOG_MSG("DEBUG: Component: %s has not been initialised.\n", component.c_str());
+				hasErrorHappened = true;
+				continue;
+			}
+
+			char *end = nullptr;
+			uint32_t rawBreakpointAddress = std::strtoul(rawBreakpointAddressString.c_str(), &end, 16);
+
+			if (rawBreakpointAddress == 0 && end == rawBreakpointAddressString.c_str()) {
+				LOG_MSG("DEBUG: %s is not a hex number\n", rawBreakpointAddressString.c_str());
+				hasErrorHappened = true;
+				continue;
+			}
+
+			uint32_t actualAddress = componentData.loadAddress + (rawBreakpointAddress - componentData.baseAddress);
+
+			if (!IsDebugAddressMapped(cs, actualAddress)) {
+				LOG_MSG("DEBUG: %x:%x for component %s is not currently mapped\n", csValue, actualAddress,
+					component.c_str());
+				hasErrorHappened = true;
+				continue;
+			}
+
+			breakpoints.emplace_back(ComponentBreakpoint{uppercaseComponent, actualAddress});
+		}
+
+		file.close();
+
+		if (!hasErrorHappened) {
+			for (const auto& breakpoint : breakpoints) {
+				CBreakpoint::AddBreakpoint(csValue, breakpoint.breakpointAddress, false);
+			}
 		}
 
 		return true;
@@ -6334,6 +6515,16 @@ void DEBUG_Init() {
 
 	/* shutdown function */
 	AddExitFunction(AddExitFunctionFuncPair(DEBUG_ShutDown));
+
+#if C_HEAVY_DEBUG
+	/* Load the component base/entry map once, for the EBASE/COMPONENTS commands.
+	 * Optional: if the file is missing the map just stays empty. */
+
+	string componentsFileName = CBreakpoint::AssetDir() + "components.json";
+
+	if (!LoadComponents(componentsFileName.c_str(), componentContainer, nullptr))
+		LOG(LOG_MISC, LOG_DEBUG)("DEBUG: no components file loaded");
+#endif
 }
 
 // DEBUGGING VAR STUFF
