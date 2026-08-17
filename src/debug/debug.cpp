@@ -754,14 +754,14 @@ CBreakpoint* CBreakpoint::AddMemBreakpoint(uint16_t seg, uint32_t off)
 
 std::string CBreakpoint::AssetDir(void)
 {
-	std::string dir;
+	std::string workingDir;
 	Section_prop *sec = static_cast<Section_prop *>(control->GetSection("dosbox"));
-	if (sec) dir = sec->Get_string("debugger assets directory");
-	if (dir.empty()) dir = "~/dosbox-x-debugger";
 
-	Cross::ResolveHomedir(dir);	// expand a leading ~ / ~user
-	if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') dir += CROSS_FILESPLIT;
-	return dir;
+	if (sec) workingDir = sec->Get_string("working directory default");
+
+	Cross::ResolveHomedir(workingDir);	// expand a leading ~ / ~user
+	if (!workingDir.empty() && workingDir.back() != '/' && workingDir.back() != '\\') workingDir += CROSS_FILESPLIT;
+	return workingDir + CROSS_FILESPLIT + "debugger" + CROSS_FILESPLIT;
 }
 
 std::string CBreakpoint::ScriptDir(void)
