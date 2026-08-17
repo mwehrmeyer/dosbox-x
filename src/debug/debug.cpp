@@ -633,9 +633,9 @@ public:
 	static CBreakpoint*		AddScriptPoint		(uint16_t seg, uint32_t off, const std::string& file);
 	static CBreakpoint*		AddNativePoint		(uint16_t seg, uint32_t off, const std::string& callbackName);
 	static void				RunScriptPoints		(uint16_t seg, uint32_t off);
-	static std::string		AssetDir			(void);	// ~/dosbox-x-debugger-assets/
-	static std::string		ScriptDir			(void);	// AssetDir()/scripts/
-	static std::string		BreakpointListDir   (void); // AssetDir()/breakpoints/
+	static std::string		AssetDir			(void);
+	static std::string		ScriptDir			(void);
+	static std::string		BreakpointListDir   (void);
 	static void				DeactivateBreakpoints();
 	static void				ActivateBreakpoints	();
 	static void				ActivateBreakpointsExceptAt(PhysPt adr);
@@ -752,9 +752,6 @@ CBreakpoint* CBreakpoint::AddMemBreakpoint(uint16_t seg, uint32_t off)
 	return bp;
 }
 
-// Base directory holding scriptpoint command files. Configurable via the
-// "debugger command directory" option in the [dosbox] config section; defaults
-// to ~/dosbox-x-debugger-assets/. A leading ~ is expanded to the user's home directory.
 std::string CBreakpoint::AssetDir(void)
 {
 	std::string dir;
@@ -2111,9 +2108,14 @@ void createBreakpointFromSegOfs(uint16_t seg, uint32_t ofs) {
 	DEBUG_ShowMsg("DEBUG: Set breakpoint at %04X:%04X\n",seg,ofs);
 }
 
-void toUpper(std::string &string) {
+static void transformToUpper(std::string &string) {
 	std::transform(string.begin(), string.end(), string.begin(),
-	   [](unsigned char c){ return std::tolower(c); });
+	               [](const unsigned char c) { return std::toupper(c); });
+}
+
+static void transformToLower(std::string &str) {
+	std::transform(str.begin(), str.end(), str.begin(),
+	               [](const unsigned char c) { return std::tolower(c); });
 }
 
 bool ParseCommand(char* str) {
@@ -3104,8 +3106,7 @@ bool ParseCommand(char* str) {
 			return true;
 		}
 
-		std::transform(bpFilename.begin(), bpFilename.end(), bpFilename.begin(),
-		   [](unsigned char c){ return std::tolower(c); });
+		transformToLower(bpFilename);
 
 		auto bpFile = CBreakpoint::BreakpointListDir() + bpFilename;
 		LOG_MSG("DEBUG: GENBP looks for file \"%s\"\n", bpFile.c_str());
@@ -3151,9 +3152,7 @@ bool ParseCommand(char* str) {
 			}
 
 			std::string uppercaseComponent = component;
-
-			std::transform(uppercaseComponent.begin(), uppercaseComponent.end(), uppercaseComponent.begin(),
-               [](unsigned char c){ return std::toupper(c); });
+			transformToUpper(uppercaseComponent);
 
 			auto it = componentContainer.components.find(uppercaseComponent);
 			if (it == componentContainer.components.end()) {
