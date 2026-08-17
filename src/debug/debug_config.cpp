@@ -40,6 +40,7 @@ static void from_json(const nlohmann::json& j, ComponentData& c)
 {
 	c.entryPoint  = parse_u32(j.at("entryPoint"));
 	c.baseAddress = parse_u32(j.at("baseAddress"));
+	c.length = parse_u32(j.at("length"));
 }
 
 static void from_json(const nlohmann::json& j, Kernel& k)

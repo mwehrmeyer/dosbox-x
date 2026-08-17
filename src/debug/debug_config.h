@@ -26,6 +26,7 @@
 struct ComponentData {
 	uint32_t entryPoint;
 	uint32_t baseAddress;
+	uint32_t length;
 	uint32_t loadAddress = 0;
 	bool isLoadAddressSet = false;
 };
