@@ -2946,6 +2946,12 @@ bool ParseCommand(char* str) {
 			return true;
 		}
 
+		if (ofs < componentData.baseAddress || ofs > componentData.baseAddress + componentData.length) {
+			LOG_MSG("DEBUG: Address %s out of range for component %s [%X:%X]\n", offsetString.c_str(),
+				componentName.c_str(), componentData.baseAddress, componentData.baseAddress + componentData.length);
+			return true;
+		}
+
 		auto csValue = SegValue(cs);
 		uint32_t actualBreakpointAddress = componentData.loadAddress + (ofs - componentData.baseAddress);
 		LOG_MSG("Set breakpoint for %s at %X:%X\n", offsetString.c_str(), csValue, actualBreakpointAddress);
