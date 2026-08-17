@@ -3207,6 +3207,52 @@ bool ParseCommand(char* str) {
 		return true;
 	}
 
+	if (command == "DC") { // Set data overview relative to component
+		std::istringstream iss(found);
+
+		std::string componentName;
+		std::string addressString;
+
+		if (!(iss >> componentName >> addressString)) {
+			DEBUG_ShowMsg("DEBUG: Usage: DC <component> <address>\n");
+			return true;
+		}
+
+		char *end;
+		uint32_t ofs = std::strtoul(addressString.c_str(), &end, 16);
+
+		if (ofs == 0 && end == addressString.c_str()) {
+			LOG_MSG("DEBUG: %s is not a hex number\n", addressString.c_str());
+			return true;
+		}
+
+		auto it = componentContainer.components.find(componentName);
+		if (it == componentContainer.components.end()) {
+			LOG_MSG("DEBUG: Unknown component: %s\n", componentName.c_str());
+			return true;
+		}
+
+		auto component = it->second;
+		if (!component.isLoadAddressSet) {
+			LOG_MSG("DEBUG: Component %s is not loaded\n", componentName.c_str());
+			return true;
+		}
+
+		if (ofs < component.baseAddress || ofs > component.baseAddress + component.length) {
+			LOG_MSG("DEBUG: Address %s out of range for component %s [%X:%X]\n", addressString.c_str(),
+				componentName.c_str(), component.baseAddress, component.baseAddress + component.length);
+			return true;
+		}
+
+		dataSeg = SegValue(ds);
+		dataOfs = component.loadAddress + (ofs - component.baseAddress);
+		dbg.set_data_view(DBGBlock::DATV_SEGMENTED);
+
+		DEBUG_ShowMsg("DEBUG: Set data view to %X:%X (%s:%s)\n", dataSeg, dataOfs, componentName.c_str(),
+		              addressString.c_str());
+		return true;
+	}
+
 #endif
 
 	if (command == "BPINT") { // Add Interrupt Breakpoint
