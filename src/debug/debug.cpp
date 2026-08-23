@@ -3253,6 +3253,64 @@ bool ParseCommand(char* str) {
 		return true;
 	}
 
+	if (command == "DRPC") {
+		// De-references a four-byte pointer relative to the given component and displays it in data view.
+		uint32_t ptr;
+
+		istringstream iss(found);
+		std::string componentName;
+		std::string offsetString;
+
+		if (!(iss >> componentName >> offsetString)) {
+			LOG_MSG("Usage: DRPC <component> <offset>\n");
+			return true;
+		}
+
+		char *end;
+		uint32_t ofs = std::strtoul(offsetString.c_str(), &end, 16);
+
+		if (ofs == 0 && end == offsetString.c_str()) {
+			LOG_MSG("DEBUG: %s is not a hex number\n", offsetString.c_str());
+			return true;
+		}
+
+		transformToUpper(componentName);
+		auto it = componentContainer.components.find(componentName);
+		if (it == componentContainer.components.end()) {
+			LOG_MSG("DEBUG: Unknown component: %s\n", componentName.c_str());
+			return true;
+		}
+
+		auto component = it->second;
+		if (!component.isLoadAddressSet) {
+			LOG_MSG("DEBUG: Component %s is not loaded\n", componentName.c_str());
+			return true;
+		}
+
+		if (ofs < component.baseAddress || ofs > component.baseAddress + component.length) {
+			LOG_MSG("DEBUG: Address %s out of range for component %s [%X:%X]\n", offsetString.c_str(),
+				componentName.c_str(), component.baseAddress, component.baseAddress + component.length);
+			return true;
+		}
+
+		auto absoluteOffset = component.loadAddress + (ofs - component.baseAddress);
+
+		uint16_t dsSeg = SegValue(ds);
+		bool memReadHasFailed = mem_readd_checked((PhysPt)GetAddress(dsSeg,absoluteOffset), &ptr);
+
+		if (memReadHasFailed) {
+			DEBUG_ShowMsg("DEBUG: Could not read offset from %04X:%04X\n",absoluteOffset,ofs);
+			return false;
+		}
+
+		dataSeg = dsSeg;
+		dataOfs = ptr;
+
+		dbg.set_data_view(DBGBlock::DATV_SEGMENTED);
+		DEBUG_ShowMsg("DEBUG: DRP4 has set data overview to %04X:%04X\n",dataSeg,dataOfs);
+		return true;
+	}
+
 #endif
 
 	if (command == "BPINT") { // Add Interrupt Breakpoint
