@@ -24,6 +24,8 @@
 
 #include <string>
 
+#include "debug_config.h"
+
 #define PAIR_BLACK_BLUE 1
 #define PAIR_BYELLOW_BLACK 2
 #define PAIR_GREEN_BLACK 3
@@ -118,5 +120,17 @@ extern DBGBlock dbg;
 /* Local Debug Stuff */
 Bitu DasmI386(char* buffer, PhysPt pc, uint32_t cur_ip, bool bit32);
 int  DasmLastOperandSize(void);
+
+/* Implemented in debug.cpp, shared with the other debugger translation units
+ * (debug_gui.cpp, debug_user_callbacks.cpp). Declare anything else they need from
+ * debug.cpp here, so the declaration is checked against the definition. */
+uint64_t GetAddress(uint16_t seg, uint32_t offset);
+bool ParseCommand(char* str);
+
+#if C_HEAVY_DEBUG
+/* Component map loaded from components.json by DEBUG_Init(); load addresses are filled
+ * in by the EBASE command. Defined in debug.cpp. */
+extern ComponentListContainer componentContainer;
+#endif
 #endif
 

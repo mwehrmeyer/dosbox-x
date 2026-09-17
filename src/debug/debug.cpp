@@ -50,6 +50,7 @@ using namespace std;
 #include "shell.h"
 #include "debug_inc.h"
 #include "debug_config.h"
+#include "debug_user_callbacks.h"	// user-editable compiled-in RUNC callbacks (see that file)
 #include "../cpu/lazyflags.h"
 #include "keyboard.h"
 #include "control.h"
@@ -150,6 +151,10 @@ extern uint8_t                     pc98_pal_digital[8];    /* G R B    0x0..0x7 
 
 extern bool logBuffSuppressConsole;
 extern bool logBuffSuppressConsoleNeedUpdate;
+
+#ifdef C_HEAVY_DEBUG
+extern std::list<DataRecord> dataRecordList;
+#endif
 
 void DEBUG_PrintGUS();
 void DEBUG_PrintRTC();
@@ -350,6 +355,14 @@ static bool check_rescroll = false;
 static FPU_rec oldfpu;
 static bool warn_dynamic = false;
 
+#ifdef C_HEAVY_DEBUG
+template<typename T>
+struct Success{
+	T value;
+	bool success;
+};
+Success<uint32_t> calculateAddressRelativeToComponent(string &componentName, const string &offsetString, uint32_t ofs);
+#endif
 
 void VGA_DebugRedraw(void);
 
@@ -774,10 +787,11 @@ std::string CBreakpoint::BreakpointListDir(void)
 	return AssetDir() + "breakpoints" + CROSS_FILESPLIT;
 }
 
+#ifdef C_HEAVY_DEBUG
 // ---- Compiled-in breakpoint callbacks (the RUNC command) -------------------------------
 // Registry of named C++ functions that can be bound to an instruction address. Names are
 // matched case-insensitively (stored upper-cased, because the command parser upper-cases
-// its input). See debug_user_callbacks.h for where user callbacks are registered.
+// its input). See debug_user_callbacks.cpp for where user callbacks are registered.
 static std::map<std::string, DEBUG_ScriptCallback>& DebugCallbacks(void)
 {
 	static std::map<std::string, DEBUG_ScriptCallback> registry;
@@ -881,6 +895,7 @@ void CBreakpoint::RunScriptPoints(uint16_t seg, uint32_t off)
 		}
 	}
 }
+#endif
 
 void CBreakpoint::ActivateBreakpoints()
 {
@@ -2952,8 +2967,9 @@ bool ParseCommand(char* str) {
 			return true;
 		}
 
-		auto csValue = SegValue(cs);
 		uint32_t actualBreakpointAddress = componentData.loadAddress + (ofs - componentData.baseAddress);
+
+		auto csValue = SegValue(cs);
 		LOG_MSG("Set breakpoint for %s at %X:%X\n", offsetString.c_str(), csValue, actualBreakpointAddress);
 
 		createBreakpointFromSegOfs(csValue, actualBreakpointAddress);
@@ -2996,25 +3012,38 @@ bool ParseCommand(char* str) {
 	}
 
 	if (command == "RUNC") { // Run a compiled-in callback whenever an instruction is executed
-		// RUNC seg:off <callback name>
-		uint16_t seg = (uint16_t)GetHexValue(found,found); found++; // skip ":"
-		uint32_t ofs = GetHexValue(found,found);
+		string componentName, offsetString, callbackName;
 
-		std::string name = trim(found);	// already upper-cased by ParseCommand; lookup is case-insensitive
-		if (name.empty()) {
-			LOG_MSG("Usage: RUNC seg:off <callback name>   (known: %s)",DebugCallbackNames().c_str());
+		std::istringstream commandLineStream(found);
+		if (!(commandLineStream >> componentName >> offsetString >> callbackName)) {
+			DEBUG_ShowMsg("DEBUG: RUNC <componentName> <offset> <callbackName>\n");
 			return true;
 		}
 
 		// Callbacks are compiled in and registered at startup: if the name is unknown now,
 		// it will never appear, so reject instead of creating a breakpoint that never fires.
-		if (!DebugFindCallback(name)) {
-			DEBUG_ShowMsg("DEBUG: No compiled callback named '%s'. Known callbacks: %s\n",name.c_str(),DebugCallbackNames().c_str());
+		if (!DebugFindCallback(callbackName)) {
+			DEBUG_ShowMsg("DEBUG: No compiled callback named '%s'. Known callbacks: %s\n",callbackName.c_str(),DebugCallbackNames().c_str());
 			return true;
 		}
 
-		CBreakpoint::AddNativePoint(seg,ofs,name);
-		DEBUG_ShowMsg("DEBUG: Set native scriptpoint at %X:%X -> %s()\n",seg,ofs,name.c_str());
+		char *end;
+		uint32_t ofs = std::strtoul(offsetString.c_str(), &end, 16);
+
+		if (ofs == 0 && end == offsetString.c_str()) {
+			LOG_MSG("DEBUG: %s is not a hex number\n", offsetString.c_str());
+			return true;
+		}
+
+		Success<uint32_t> addressCalculationSuccess = calculateAddressRelativeToComponent(componentName, offsetString, ofs);
+		if (!addressCalculationSuccess.success) {
+			return true;
+		}
+
+		uint16_t csValue = SegValue(cs);
+		CBreakpoint::AddNativePoint(csValue, addressCalculationSuccess.value, callbackName);
+		DEBUG_ShowMsg("DEBUG: Set native scriptpoint at %X:%X -> %s()\n", csValue, addressCalculationSuccess.value,
+		              callbackName.c_str());
 		DEBUG_ShowMsg("DEBUG: Remove it like any breakpoint with BPDEL (see BPLIST).\n");
 		return true;
 	}
@@ -3226,26 +3255,13 @@ bool ParseCommand(char* str) {
 			return true;
 		}
 
-		auto it = componentContainer.components.find(componentName);
-		if (it == componentContainer.components.end()) {
-			LOG_MSG("DEBUG: Unknown component: %s\n", componentName.c_str());
-			return true;
-		}
-
-		auto component = it->second;
-		if (!component.isLoadAddressSet) {
-			LOG_MSG("DEBUG: Component %s is not loaded\n", componentName.c_str());
-			return true;
-		}
-
-		if (ofs < component.baseAddress || ofs > component.baseAddress + component.length) {
-			LOG_MSG("DEBUG: Address %s out of range for component %s [%X:%X]\n", addressString.c_str(),
-				componentName.c_str(), component.baseAddress, component.baseAddress + component.length);
+		Success<uint32_t> success = calculateAddressRelativeToComponent(componentName, addressString, ofs);
+		if (!success.success) {
 			return true;
 		}
 
 		dataSeg = SegValue(ds);
-		dataOfs = component.loadAddress + (ofs - component.baseAddress);
+		dataOfs = success.value;
 		dbg.set_data_view(DBGBlock::DATV_SEGMENTED);
 
 		DEBUG_ShowMsg("DEBUG: Set data view to %X:%X (%s:%s)\n", dataSeg, dataOfs, componentName.c_str(),
@@ -3274,32 +3290,16 @@ bool ParseCommand(char* str) {
 			return true;
 		}
 
-		transformToUpper(componentName);
-		auto it = componentContainer.components.find(componentName);
-		if (it == componentContainer.components.end()) {
-			LOG_MSG("DEBUG: Unknown component: %s\n", componentName.c_str());
+		Success<uint32_t> success = calculateAddressRelativeToComponent(componentName, offsetString, ofs);
+		if (success.success == false) {
 			return true;
 		}
-
-		auto component = it->second;
-		if (!component.isLoadAddressSet) {
-			LOG_MSG("DEBUG: Component %s is not loaded\n", componentName.c_str());
-			return true;
-		}
-
-		if (ofs < component.baseAddress || ofs > component.baseAddress + component.length) {
-			LOG_MSG("DEBUG: Address %s out of range for component %s [%X:%X]\n", offsetString.c_str(),
-				componentName.c_str(), component.baseAddress, component.baseAddress + component.length);
-			return true;
-		}
-
-		auto absoluteOffset = component.loadAddress + (ofs - component.baseAddress);
 
 		uint16_t dsSeg = SegValue(ds);
-		bool memReadHasFailed = mem_readd_checked((PhysPt)GetAddress(dsSeg,absoluteOffset), &ptr);
+		bool memReadHasFailed = mem_readd_checked((PhysPt)GetAddress(dsSeg,success.value), &ptr);
 
 		if (memReadHasFailed) {
-			DEBUG_ShowMsg("DEBUG: Could not read offset from %04X:%04X\n",absoluteOffset,ofs);
+			DEBUG_ShowMsg("DEBUG: Could not read offset from %04X:%04X\n",success.value,ofs);
 			return false;
 		}
 
@@ -3309,6 +3309,34 @@ bool ParseCommand(char* str) {
 		dbg.set_data_view(DBGBlock::DATV_SEGMENTED);
 		DEBUG_ShowMsg("DEBUG: DRP4 has set data overview to %04X:%04X\n",dataSeg,dataOfs);
 		return true;
+	}
+
+	if (command == "FLUSH") {
+		std::ofstream file;
+		std::string filename;
+
+		file.open("./flushFile");
+
+		if (!file.is_open()) {
+			DEBUG_ShowMsg("DEBUG: cannot open flushFile for writing: %s", "flushFile");
+			return true;
+		}
+
+		for (auto & it : dataRecordList) {
+			file << std::setw(2) << std::setfill('0') << std::hex << std::uppercase << static_cast<unsigned int>(it.al)
+					<< " "
+					<< std::nouppercase << it.state
+					<< endl;
+
+			file << std::setfill(' ');
+		}
+
+		file.close();
+		return true;
+	}
+
+	if (command == "CLEAR") {
+		dataRecordList.clear();
 	}
 
 #endif
@@ -5057,6 +5085,33 @@ void win_code_ui_down(int count) {
     }
 }
 
+#ifdef C_HEAVY_DEBUG
+Success<uint32_t> calculateAddressRelativeToComponent(string &componentName, const string &offsetString, const uint32_t ofs) {
+
+	transformToUpper(componentName);
+	const auto it = componentContainer.components.find(componentName);
+	if (it == componentContainer.components.end()) {
+		LOG_MSG("DEBUG: Unknown component: %s\n", componentName.c_str());
+		return Success<uint32_t>{0, false};
+	}
+
+	auto component = it->second;
+	if (!component.isLoadAddressSet) {
+		LOG_MSG("DEBUG: Component %s is not loaded\n", componentName.c_str());
+		return Success<uint32_t>{0, false};
+	}
+
+	if (ofs < component.baseAddress || ofs > component.baseAddress + component.length) {
+		LOG_MSG("DEBUG: Address %s out of range for component %s [%X:%X]\n", offsetString.c_str(),
+			componentName.c_str(), component.baseAddress, component.baseAddress + component.length);
+		return Success<uint32_t>{0, false};
+	}
+
+	auto absoluteOffset = component.loadAddress + (ofs - component.baseAddress);
+	return Success<uint32_t>{absoluteOffset, true};
+}
+#endif
+
 void win_code_ui_up(int count) {
     if (dbg.win_code != NULL) {
         int y,x;
@@ -6561,12 +6616,12 @@ void DBGBlock::set_data_view(unsigned int view) {
     }
 }
 
-#include "debug_user_callbacks.h"	// user-editable compiled-in RUNC callbacks (see file header)
-
 void DEBUG_SetupConsole(void) {
 	// Register compiled-in breakpoint callbacks once, so RUNC / RUNCLIST can find them.
+#if C_HEAVY_DEBUG
 	static bool callbacksRegistered = false;
 	if (!callbacksRegistered) { DEBUG_RegisterUserCallbacks(); callbacksRegistered = true; }
+#endif
 
 	if (dbg.win_main == NULL) {
         LOG(LOG_MISC, LOG_DEBUG)("DEBUG_SetupConsole initializing GUI");
