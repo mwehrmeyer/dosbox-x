@@ -3337,6 +3337,7 @@ bool ParseCommand(char* str) {
 
 	if (command == "CLEAR") {
 		dataRecordList.clear();
+		return true;
 	}
 
 #endif
