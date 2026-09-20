@@ -70,7 +70,6 @@ template <
 >
 void printHex(std::ofstream &file, const DataRecord<T> &it) {
     file
-        << "0x"
         << std::uppercase
         << std::hex
         << std::setw(sizeof(T) * 2)
