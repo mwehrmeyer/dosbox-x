@@ -153,7 +153,9 @@ extern bool logBuffSuppressConsole;
 extern bool logBuffSuppressConsoleNeedUpdate;
 
 #ifdef C_HEAVY_DEBUG
-extern std::list<DataRecord> dataRecordList;
+extern std::list<DataRecord<uint8_t>> dataRecordList8;
+extern std::list<DataRecord<uint16_t>> dataRecordList16;
+extern std::list<DataRecord<uint32_t>> dataRecordList32;
 #endif
 
 void DEBUG_PrintGUS();
@@ -356,12 +358,8 @@ static FPU_rec oldfpu;
 static bool warn_dynamic = false;
 
 #ifdef C_HEAVY_DEBUG
-template<typename T>
-struct Success{
-	T value;
-	bool success;
-};
-Success<uint32_t> calculateAddressRelativeToComponent(string &componentName, const string &offsetString, uint32_t ofs);
+
+Result<uint32_t> calculateAddressRelativeToComponent(string &componentName, const string &offsetString, uint32_t ofs);
 #endif
 
 void VGA_DebugRedraw(void);
@@ -3035,7 +3033,7 @@ bool ParseCommand(char* str) {
 			return true;
 		}
 
-		Success<uint32_t> addressCalculationSuccess = calculateAddressRelativeToComponent(componentName, offsetString, ofs);
+		Result<uint32_t> addressCalculationSuccess = calculateAddressRelativeToComponent(componentName, offsetString, ofs);
 		if (!addressCalculationSuccess.success) {
 			return true;
 		}
@@ -3255,7 +3253,7 @@ bool ParseCommand(char* str) {
 			return true;
 		}
 
-		Success<uint32_t> success = calculateAddressRelativeToComponent(componentName, addressString, ofs);
+		Result<uint32_t> success = calculateAddressRelativeToComponent(componentName, addressString, ofs);
 		if (!success.success) {
 			return true;
 		}
@@ -3290,7 +3288,7 @@ bool ParseCommand(char* str) {
 			return true;
 		}
 
-		Success<uint32_t> success = calculateAddressRelativeToComponent(componentName, offsetString, ofs);
+		Result<uint32_t> success = calculateAddressRelativeToComponent(componentName, offsetString, ofs);
 		if (success.success == false) {
 			return true;
 		}
@@ -3311,32 +3309,51 @@ bool ParseCommand(char* str) {
 		return true;
 	}
 
-	if (command == "FLUSH") {
-		std::ofstream file;
-		std::string filename;
+	if (command == "FLUSH8") {
+		string filename;
 
-		file.open("./flushFile");
-
-		if (!file.is_open()) {
-			DEBUG_ShowMsg("DEBUG: cannot open flushFile for writing: %s", "flushFile");
-			return true;
+		if (!(stream >> filename)) {
+			filename = "flushU8";
 		}
 
-		for (auto & it : dataRecordList) {
-			file << std::setw(2) << std::setfill('0') << std::hex << std::uppercase << static_cast<unsigned int>(it.al)
-					<< " "
-					<< std::nouppercase << it.state
-					<< endl;
-
-			file << std::setfill(' ');
-		}
-
-		file.close();
+		flush(dataRecordList8, filename);
 		return true;
 	}
 
-	if (command == "CLEAR") {
-		dataRecordList.clear();
+	if (command == "FLUSHU16") {
+		string filename;
+
+		if (!(stream >> filename)) {
+			filename = "flushU16";
+		}
+
+		flush(dataRecordList16, filename);
+		return true;
+	}
+
+	if (command == "FLUSH32") {
+		string filename;
+
+		if (!(stream >> filename)) {
+			filename = "flushU32";
+		}
+
+		flush(dataRecordList32, filename);
+		return true;
+	}
+
+	if (command == "CLEAR8") {
+		dataRecordList8.clear();
+		return true;
+	}
+
+	if (command == "CLEAR16") {
+		dataRecordList16.clear();
+		return true;
+	}
+
+	if (command == "CLEAR32") {
+		dataRecordList32.clear();
 		return true;
 	}
 
@@ -5087,30 +5104,31 @@ void win_code_ui_down(int count) {
 }
 
 #ifdef C_HEAVY_DEBUG
-Success<uint32_t> calculateAddressRelativeToComponent(string &componentName, const string &offsetString, const uint32_t ofs) {
+Result<uint32_t> calculateAddressRelativeToComponent(string &componentName, const string &offsetString, const uint32_t ofs) {
 
 	transformToUpper(componentName);
 	const auto it = componentContainer.components.find(componentName);
 	if (it == componentContainer.components.end()) {
 		LOG_MSG("DEBUG: Unknown component: %s\n", componentName.c_str());
-		return Success<uint32_t>{0, false};
+		return Result<uint32_t>{0, false};
 	}
 
 	auto component = it->second;
 	if (!component.isLoadAddressSet) {
 		LOG_MSG("DEBUG: Component %s is not loaded\n", componentName.c_str());
-		return Success<uint32_t>{0, false};
+		return Result<uint32_t>{0, false};
 	}
 
 	if (ofs < component.baseAddress || ofs > component.baseAddress + component.length) {
 		LOG_MSG("DEBUG: Address %s out of range for component %s [%X:%X]\n", offsetString.c_str(),
 			componentName.c_str(), component.baseAddress, component.baseAddress + component.length);
-		return Success<uint32_t>{0, false};
+		return Result<uint32_t>{0, false};
 	}
 
 	auto absoluteOffset = component.loadAddress + (ofs - component.baseAddress);
-	return Success<uint32_t>{absoluteOffset, true};
+	return Result<uint32_t>{absoluteOffset, true};
 }
+
 #endif
 
 void win_code_ui_up(int count) {
