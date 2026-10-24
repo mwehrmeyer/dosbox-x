@@ -16,6 +16,9 @@
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  */
 
+#include <string>
+#include <vector>
+
 void DEBUG_SetupConsole(void);
 void DEBUG_DrawScreen(void);
 bool DEBUG_Breakpoint(void);
@@ -28,11 +31,15 @@ Bitu DEBUG_EnableDebugger(void);
 
 /* Compiled-in breakpoint callbacks: a function bound to an instruction address via the
  * debugger "RUNC" command. When the CPU reaches that address the function is called with
- * the current code segment and offset, then execution continues. Register a callback (by
+ * the current code segment and offset, plus any extra arguments given after the callback
+ * name on the RUNC command line, then execution continues. Register a callback (by
  * name, matched case-insensitively) with DEBUG_RegisterCallback; the callback has full
  * access to registers, memory, logging and ParseCommand, just like any other debugger code. */
-typedef void (*DEBUG_ScriptCallback)(uint16_t seg, uint32_t off);
+typedef void (*DEBUG_ScriptCallback)(uint16_t seg, uint32_t off, const std::vector<std::string>& args);
 void DEBUG_RegisterCallback(const char* name, DEBUG_ScriptCallback fn);
+// Call from inside a callback to stop in the debugger at the instruction that triggered it,
+// like a regular breakpoint would. Use it to build conditional breakpoints.
+void DEBUG_RequestBreak(void);
 
 extern Bitu cycle_count;
 extern Bitu debugCallback;

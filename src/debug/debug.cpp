@@ -357,11 +357,6 @@ static bool check_rescroll = false;
 static FPU_rec oldfpu;
 static bool warn_dynamic = false;
 
-#ifdef C_HEAVY_DEBUG
-
-Result<uint32_t> calculateAddressRelativeToComponent(string &componentName, const string &offsetString, uint32_t ofs);
-#endif
-
 void VGA_DebugRedraw(void);
 
 void VGA_DebugOverrideStart(uint32_t ofs,bool sum);
@@ -623,6 +618,7 @@ public:
 	void					SetValue		(uint8_t value)				{ ahValue = value; };
 	void					SetOther		(uint8_t other)				{ alValue = other; };
 	void					SetScriptFile	(const std::string& f)		{ scriptFile = f; };
+	void					SetCallbackArgs	(const std::vector<std::string>& a)	{ callbackArgs = a; };
 
 	bool					IsActive		(void)						{ return active; };
 	void					Activate		(bool _active);
@@ -636,14 +632,15 @@ public:
 	uint16_t					GetValue		(void)						{ return ahValue; };
 	uint16_t					GetOther		(void)						{ return alValue; };
 	const std::string&		GetScriptFile	(void)						{ return scriptFile; };
+	const std::vector<std::string>&	GetCallbackArgs	(void)				{ return callbackArgs; };
 
 	// statics
 	static CBreakpoint*		AddBreakpoint		(uint16_t seg, uint32_t off, bool once);
 	static CBreakpoint*		AddIntBreakpoint	(uint8_t intNum, uint16_t ah, uint16_t al, bool once);
 	static CBreakpoint*		AddMemBreakpoint	(uint16_t seg, uint32_t off);
 	static CBreakpoint*		AddScriptPoint		(uint16_t seg, uint32_t off, const std::string& file);
-	static CBreakpoint*		AddNativePoint		(uint16_t seg, uint32_t off, const std::string& callbackName);
-	static void				RunScriptPoints		(uint16_t seg, uint32_t off);
+	static CBreakpoint*		AddNativePoint		(uint16_t seg, uint32_t off, const std::string& callbackName, const std::vector<std::string>& args);
+	static bool				RunScriptPoints		(uint16_t seg, uint32_t off);
 	static std::string		AssetDir			(void);
 	static std::string		ScriptDir			(void);
 	static std::string		BreakpointListDir   (void);
@@ -676,6 +673,8 @@ private:
 	uint16_t		alValue;
 	// Script: path of the command file, relative to ~/dosbox-x-commands/
 	std::string	scriptFile;
+	// Native: extra arguments passed to the compiled-in callback
+	std::vector<std::string>	callbackArgs;
 	// Shared
 	bool		active;
 	bool		once;
@@ -814,6 +813,14 @@ static DEBUG_ScriptCallback DebugFindCallback(const std::string& nameUpper)
 	return (it == DebugCallbacks().end()) ? nullptr : it->second;
 }
 
+// Set by DEBUG_RequestBreak() while a callback runs; RunScriptPoints reports it.
+static bool debugCallbackRequestedBreak = false;
+
+void DEBUG_RequestBreak(void)
+{
+	debugCallbackRequestedBreak = true;
+}
+
 static std::string DebugCallbackNames(void)
 {
 	std::string out;
@@ -833,13 +840,14 @@ CBreakpoint* CBreakpoint::AddScriptPoint(uint16_t seg, uint32_t off, const std::
 	return bp;
 }
 
-CBreakpoint* CBreakpoint::AddNativePoint(uint16_t seg, uint32_t off, const std::string& callbackName)
+CBreakpoint* CBreakpoint::AddNativePoint(uint16_t seg, uint32_t off, const std::string& callbackName, const std::vector<std::string>& args)
 {
 	CBreakpoint* bp = new CBreakpoint();
 	bp->SetAddress		(seg,off);
 	bp->SetType			(BKPNT_NATIVE);
 	bp->SetOnce			(false);
 	bp->SetScriptFile	(callbackName);	// re-use the script-file field to hold the callback name
+	bp->SetCallbackArgs	(args);
 	bp->Activate		(true);
 	BPoints.push_front	(bp);
 	return bp;
@@ -851,27 +859,29 @@ CBreakpoint* CBreakpoint::AddNativePoint(uint16_t seg, uint32_t off, const std::
 //                   command. The file is read fresh on every hit, so edits take effect
 //                   without restarting dosbox-x.
 //   BKPNT_NATIVE  - call a compiled-in C++ callback (registered via DEBUG_RegisterCallback).
-void CBreakpoint::RunScriptPoints(uint16_t seg, uint32_t off)
+// Returns true if a callback asked to stop in the debugger (DEBUG_RequestBreak).
+bool CBreakpoint::RunScriptPoints(uint16_t seg, uint32_t off)
 {
-	if (BPoints.empty()) return;
+	if (BPoints.empty()) return false;
 
 	const PhysPt addr = (PhysPt)GetAddress(seg, off);
 
 	// Collect actions first, so a command/callback that edits the breakpoint list
 	// (e.g. BPDEL) cannot invalidate the iterator while we run it.
-	struct Pending { EBreakpoint type; std::string payload; };
+	struct Pending { EBreakpoint type; std::string payload; std::vector<std::string> args; };
 	std::list<Pending> pending;
 	for (auto i = BPoints.begin(); i != BPoints.end(); ++i) {
 		CBreakpoint* bp = (*i);
 		if (!bp->IsActive() || bp->GetLocation() != addr) continue;
 		if (bp->GetType() == BKPNT_SCRIPT || bp->GetType() == BKPNT_NATIVE)
-			pending.push_back({ bp->GetType(), bp->GetScriptFile() });
+			pending.push_back({ bp->GetType(), bp->GetScriptFile(), bp->GetCallbackArgs() });
 	}
 
+	debugCallbackRequestedBreak = false;
 	for (auto& p : pending) {
 		if (p.type == BKPNT_NATIVE) {
 			DEBUG_ScriptCallback fn = DebugFindCallback(p.payload);
-			if (fn) fn(seg, off);	// missing callback: silently skip (rejected at creation time)
+			if (fn) fn(seg, off, p.args);	// missing callback: silently skip (rejected at creation time)
 			continue;
 		}
 
@@ -892,6 +902,7 @@ void CBreakpoint::RunScriptPoints(uint16_t seg, uint32_t off)
 			ParseCommand(buf.data());	// ParseCommand copies the buffer, never writes to it
 		}
 	}
+	return debugCallbackRequestedBreak;
 }
 #endif
 
@@ -1129,7 +1140,9 @@ void CBreakpoint::ShowList(void)
 		} else if (bp->GetType()==BKPNT_SCRIPT ) {
 			DEBUG_ShowMsg("%02X. RUNAT %04X:%04X -> %s\n",nr,bp->GetSegment(),bp->GetOffset(),bp->GetScriptFile().c_str());
 		} else if (bp->GetType()==BKPNT_NATIVE ) {
-			DEBUG_ShowMsg("%02X. RUNC %04X:%04X -> %s()\n",nr,bp->GetSegment(),bp->GetOffset(),bp->GetScriptFile().c_str());
+			std::string args;
+			for (auto& a : bp->GetCallbackArgs()) { if (!args.empty()) args += ", "; args += a; }
+			DEBUG_ShowMsg("%02X. RUNC %04X:%04X -> %s(%s)\n",nr,bp->GetSegment(),bp->GetOffset(),bp->GetScriptFile().c_str(),args.c_str());
 		}
 		nr++;
 	}
@@ -3014,8 +3027,19 @@ bool ParseCommand(char* str) {
 
 		std::istringstream commandLineStream(found);
 		if (!(commandLineStream >> componentName >> offsetString >> callbackName)) {
-			DEBUG_ShowMsg("DEBUG: RUNC <componentName> <offset> <callbackName>\n");
+			DEBUG_ShowMsg("DEBUG: RUNC <componentName> <offset> <callbackName> [args...]\n");
 			return true;
+		}
+
+		// Everything after the callback name is handed to the callback on every hit. Take the
+		// arguments from the ORIGINAL (non-upper-cased) input, so they keep their case (e.g.
+		// strings to compare against). Tokens are [RUNC] [component] [offset] [callback] [args...].
+		std::vector<std::string> callbackArgs;
+		{
+			std::istringstream originalStream(str);
+			string skip;
+			for (int tok = 0; tok < 4; tok++) originalStream >> skip;
+			for (string arg; originalStream >> arg; ) callbackArgs.push_back(arg);
 		}
 
 		// Callbacks are compiled in and registered at startup: if the name is unknown now,
@@ -3039,9 +3063,11 @@ bool ParseCommand(char* str) {
 		}
 
 		uint16_t csValue = SegValue(cs);
-		CBreakpoint::AddNativePoint(csValue, addressCalculationSuccess.value, callbackName);
-		DEBUG_ShowMsg("DEBUG: Set native scriptpoint at %X:%X -> %s()\n", csValue, addressCalculationSuccess.value,
-		              callbackName.c_str());
+		CBreakpoint::AddNativePoint(csValue, addressCalculationSuccess.value, callbackName, callbackArgs);
+		string argList;
+		for (auto& a : callbackArgs) { if (!argList.empty()) argList += ", "; argList += a; }
+		DEBUG_ShowMsg("DEBUG: Set native scriptpoint at %X:%X -> %s(%s)\n", csValue, addressCalculationSuccess.value,
+		              callbackName.c_str(), argList.c_str());
 		DEBUG_ShowMsg("DEBUG: Remove it like any breakpoint with BPDEL (see BPLIST).\n");
 		return true;
 	}
@@ -5310,13 +5336,14 @@ uint32_t DEBUG_CheckKeys(void) {
         DEBUG_DrawScreen();
         return 0;
     }
-	
+
+	/*
 	if (key >='0' && key <='5' && strlen(codeViewData.inputStr) == 0) {
 		const int32_t v[] ={1,5,500,1000,5000,10000};
 
 		ret = DEBUG_Run(v[key - '0'],true);
 
-		/* Setup variables so we end up at the proper ret processing */
+		// Setup variables so we end up at the proper ret processing
 		numberrun = true;
 
 		// Don't redraw the screen if it's going to get redrawn immediately
@@ -5325,6 +5352,7 @@ uint32_t DEBUG_CheckKeys(void) {
 			skipDraw = true;
 		key = -1;
 	}
+	*/
 
 	if (key>0 || numberrun) {
 #if defined(WIN32) && defined(__PDCURSES__)
@@ -7074,7 +7102,10 @@ bool DEBUG_HeavyIsBreakpoint(void) {
 		return false;
 	}
 	// Run any scriptpoints at this address (they execute commands and keep running).
-	CBreakpoint::RunScriptPoints(SegValue(cs),reg_eip);
+	if (CBreakpoint::RunScriptPoints(SegValue(cs),reg_eip)) {
+		DEBUG_ShowMsg("DEBUG: RUNC callback requested a break at %04X:%08X\n",SegValue(cs),reg_eip);
+		return true;
+	}
 	if (!CBreakpoint::BPoints.empty() && CBreakpoint::CheckBreakpoint(SegValue(cs),reg_eip)) {
 		return true;
 	}

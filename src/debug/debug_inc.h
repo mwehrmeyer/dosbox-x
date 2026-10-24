@@ -25,6 +25,7 @@
 #include <string>
 
 #include "debug_config.h"
+#include "debug_user_callbacks.h"
 
 #define PAIR_BLACK_BLUE 1
 #define PAIR_BYELLOW_BLACK 2
@@ -131,6 +132,10 @@ bool ParseCommand(char* str);
 /* Component map loaded from components.json by DEBUG_Init(); load addresses are filled
  * in by the EBASE command. Defined in debug.cpp. */
 extern ComponentListContainer componentContainer;
+
+/* Translates an offset inside a component (as given in components.json) to its offset in
+ * the loaded image. Logs and fails if the component is unknown, unloaded or out of range. */
+Result<uint32_t> calculateAddressRelativeToComponent(std::string &componentName, const std::string &offsetString, uint32_t ofs);
 #endif
 #endif
 
