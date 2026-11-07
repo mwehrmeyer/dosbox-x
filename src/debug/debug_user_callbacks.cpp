@@ -70,6 +70,25 @@ std::list<DataRecord<uint32_t>> dataRecordList32;
 
 static const uint32_t stateStringAddress = 0x45AAB8;
 
+static uint32_t find32BitRegister(string& registerName) {
+    string registerNameLowerCase = registerName;
+
+    std::transform(registerNameLowerCase.begin(), registerNameLowerCase.end(), registerNameLowerCase.begin(), ::tolower);
+
+    uint32_t regValue;
+
+    if (registerNameLowerCase == "esi") {
+        regValue = reg_esi;
+    } else if (registerNameLowerCase == "eax") {
+        regValue = reg_eax;
+    } else {
+        DEBUG_ShowMsg("Unknown register name %s\n", registerName.c_str());
+        regValue = -1;
+    }
+
+    return regValue;
+}
+
 // --- Example callbacks ------------------------------------------------------------------
 
 // A minimal callback: count how often the instruction was reached and print AX each time,
@@ -223,6 +242,33 @@ static void cb_log_eax_and_state(uint16_t seg, uint32_t off, const vector<string
     dataRecordList32.push_back(DataRecord<uint32_t>{reg_eax, escapedString});
 }
 
+static void cb_record_dblptr_string_by_reg(uint16_t seg, uint32_t off, const vector<string>& args) {
+    (void) seg;
+    (void) off;
+
+    if (args.size() < 2) {
+        DEBUG_ShowMsg("RUNC break_str: usage: break_str <register> <string>\n");
+        return;
+    }
+
+    string registerName = args[0];
+    uint32_t registerValue = find32BitRegister(registerName);
+
+    string expected = args[1];
+    for (size_t i = 2; i < args.size(); i++) expected += " " + args[i];
+
+    uint32_t stringPointer;
+    if (mem_readd_checked((PhysPt) GetAddress(SegValue(ds), registerValue), &stringPointer)) {
+        DEBUG_ShowMsg("RUNC: Translated %x to %x, but memory is not available", stateStringAddress, reg_esi);
+        return;
+    }
+
+    string escapedString;
+    writeEscapedString(escapedString, stringPointer);
+
+    dataRecordList32.push_back(DataRecord<uint32_t>{0, escapedString});
+}
+
 // Log AX plus the first byte that DS:SI points at - shows reading guest memory.
 static void cb_log_ax_dssi(uint16_t /*seg*/, uint32_t /*off*/, const vector<string>& /*args*/) {
     uint8_t value = 0;
@@ -323,6 +369,84 @@ static void cb_break_str(uint16_t /*seg*/, uint32_t /*off*/, const vector<string
     DEBUG_RequestBreak();
 }
 
+static void cb_break_dblptr_str_by_reg(uint16_t /*seg*/, uint32_t /*off*/, const vector<string>& args) {
+    if (args.size() < 2) {
+        DEBUG_ShowMsg("RUNC break_str: usage: break_str <register> <string>\n");
+        return;
+    }
+
+    string registerName = args[0];
+    uint32_t registerValue = find32BitRegister(registerName);
+
+    string expected = args[1];
+    for (size_t i = 2; i < args.size(); i++) expected += " " + args[i];
+
+    std::string source;
+    size_t i = 0;
+    while (i < expected.size()) {
+        unsigned char newChar;
+        char myChar = expected[i];
+        if (myChar == '\\') {
+            if (i + 1 < expected.size()) {
+                char nextChar = expected[i + 1];
+                switch (nextChar) {
+                    case 'r':
+                        newChar = '\r';
+                        i += 2;
+                        break;
+                    case 'n':
+                        newChar = '\n';
+                        i += 2;
+                        break;
+                    case 't':
+                        newChar = '\t';
+                        i += 2;
+                        break;
+                    case '\'':
+                        newChar = '\\';
+                        i += 2;
+                        break;
+                    case 'x':
+                        if (i + 3 < expected.size()) {
+                            std::sscanf(expected.c_str() + i + 2, "%2hhx", &newChar);
+                            i += 4;
+                        }
+                }
+            } else {
+                newChar = myChar;
+                i++;
+            }
+        } else {
+            newChar = myChar;
+            i++;
+        }
+
+        source.push_back(newChar);
+    }
+
+
+    uint32_t stringPointer;
+    if (mem_readd_checked((PhysPt) GetAddress(SegValue(ds), registerValue), &stringPointer)) {
+        return;
+    }
+
+    // Compare the expected characters plus the terminating NUL.
+    for (size_t i = 0; i < source.size(); i++) {
+        uint8_t byte;
+        if (mem_readb_checked((PhysPt) GetAddress(SegValue(ds), stringPointer + (uint32_t) i), &byte)) {
+            return;
+        }
+
+        uint8_t wanted = i < source.size() ? (uint8_t) source[i] : 0;
+        if (tolower(byte) != tolower(wanted)) {
+            return;
+        }
+    }
+
+    // DEBUG_ShowMsg("RUNC break_str: [%s:%X] -> %X is \"%s\"\n", componentName.c_str(), ofs, stringPointer, expected.c_str());
+    DEBUG_RequestBreak();
+}
+
 // Drive existing debugger commands from native code - shows the ParseCommand passthrough.
 static void cb_dump_stack(uint16_t /*seg*/, uint32_t /*off*/, const vector<string>& /*args*/) {
     char cmd[] = "EV SP"; // ParseCommand needs a writable buffer; it copies internally
@@ -343,9 +467,11 @@ void DEBUG_RegisterUserCallbacks(void) {
     DEBUG_RegisterCallback("al", cb_log_al_and_state);
     DEBUG_RegisterCallback("ax", cb_log_ax_and_state);
     DEBUG_RegisterCallback("eax", cb_log_eax_and_state);
+    DEBUG_RegisterCallback("record_dblptr_string_by_reg", cb_record_dblptr_string_by_reg);
     DEBUG_RegisterCallback("log_ax_dssi", cb_log_ax_dssi);
     DEBUG_RegisterCallback("dump_stack", cb_dump_stack);
     DEBUG_RegisterCallback("break_str", cb_break_str);
+    DEBUG_RegisterCallback("break_dblptr_str_by_reg", cb_break_dblptr_str_by_reg);
 
     // >>> Register your own callbacks here <<<
 }
