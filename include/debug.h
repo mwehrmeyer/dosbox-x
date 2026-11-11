@@ -16,8 +16,14 @@
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  */
 
+#ifndef DOSBOX_DEBUG_H
+#define DOSBOX_DEBUG_H
+
 #include <string>
 #include <vector>
+
+#include <cstdint>
+#include "config.h"
 
 void DEBUG_SetupConsole(void);
 void DEBUG_DrawScreen(void);
@@ -29,6 +35,17 @@ bool DEBUG_ExitLoop(void);
 void DEBUG_RefreshPage(char scroll);
 Bitu DEBUG_EnableDebugger(void);
 
+template<typename T>
+struct Result {
+ bool success;
+ T value;
+};
+
+template <>
+struct Result<void> {
+ bool success;
+};
+
 /* Compiled-in breakpoint callbacks: a function bound to an instruction address via the
  * debugger "RUNC" command. When the CPU reaches that address the function is called with
  * the current code segment and offset, plus any extra arguments given after the callback
@@ -36,7 +53,15 @@ Bitu DEBUG_EnableDebugger(void);
  * name, matched case-insensitively) with DEBUG_RegisterCallback; the callback has full
  * access to registers, memory, logging and ParseCommand, just like any other debugger code. */
 typedef void (*DEBUG_ScriptCallback)(uint16_t seg, uint32_t off, const std::vector<std::string>& args);
-void DEBUG_RegisterCallback(const char* name, DEBUG_ScriptCallback fn);
+typedef Result<std::vector<std::string>> (*ScriptCallbackArgumentPreparer)(std::istringstream& stream);
+
+struct DEBUG_CallbackDefinition {
+ DEBUG_ScriptCallback fn;
+ std::string description;
+ ScriptCallbackArgumentPreparer argumentPreparer;
+};
+void DEBUG_RegisterCallback(const char* name, DEBUG_ScriptCallback fn, const char *description,
+ ScriptCallbackArgumentPreparer argumentPreparer);
 // Call from inside a callback to stop in the debugger at the instruction that triggered it,
 // like a regular breakpoint would. Use it to build conditional breakpoints.
 void DEBUG_RequestBreak(void);
@@ -47,4 +72,6 @@ extern Bitu debugCallback;
 #ifdef C_HEAVY_DEBUG
 bool DEBUG_HeavyIsBreakpoint(void);
 void DEBUG_HeavyWriteLogInstruction(void);
+#endif
+
 #endif

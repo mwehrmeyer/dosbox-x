@@ -789,9 +789,9 @@ std::string CBreakpoint::BreakpointListDir(void)
 // Registry of named C++ functions that can be bound to an instruction address. Names are
 // matched case-insensitively (stored upper-cased, because the command parser upper-cases
 // its input). See debug_user_callbacks.cpp for where user callbacks are registered.
-static std::map<std::string, DEBUG_ScriptCallback>& DebugCallbacks(void)
+static std::map<std::string, DEBUG_CallbackDefinition>& DebugCallbacks(void)
 {
-	static std::map<std::string, DEBUG_ScriptCallback> registry;
+	static std::map<std::string, DEBUG_CallbackDefinition> registry;
 	return registry;
 }
 
@@ -802,15 +802,18 @@ static std::string DebugUpper(const std::string& s)
 	return r;
 }
 
-void DEBUG_RegisterCallback(const char* name, DEBUG_ScriptCallback fn)
+void DEBUG_RegisterCallback(const char* name, DEBUG_ScriptCallback fn, const char* description,
+	ScriptCallbackArgumentPreparer argumentPreparer)
 {
-	if (name && fn) DebugCallbacks()[DebugUpper(name)] = fn;
+	if (name && fn) {
+		DebugCallbacks()[DebugUpper(name)] = {fn, description, argumentPreparer};
+	}
 }
 
-static DEBUG_ScriptCallback DebugFindCallback(const std::string& nameUpper)
+static DEBUG_CallbackDefinition* DebugFindCallback(const std::string& nameUpper)
 {
 	auto it = DebugCallbacks().find(nameUpper);
-	return (it == DebugCallbacks().end()) ? nullptr : it->second;
+	return (it == DebugCallbacks().end()) ? nullptr : &it->second;
 }
 
 // Set by DEBUG_RequestBreak() while a callback runs; RunScriptPoints reports it.
@@ -880,7 +883,8 @@ bool CBreakpoint::RunScriptPoints(uint16_t seg, uint32_t off)
 	debugCallbackRequestedBreak = false;
 	for (auto& p : pending) {
 		if (p.type == BKPNT_NATIVE) {
-			DEBUG_ScriptCallback fn = DebugFindCallback(p.payload);
+			DEBUG_CallbackDefinition *cb  = DebugFindCallback(p.payload);
+			DEBUG_ScriptCallback fn = cb->fn;
 			if (fn) fn(seg, off, p.args);	// missing callback: silently skip (rejected at creation time)
 			continue;
 		}
@@ -3031,22 +3035,31 @@ bool ParseCommand(char* str) {
 			return true;
 		}
 
+		DEBUG_CallbackDefinition *callbackDefinition = DebugFindCallback(callbackName);
+		// Callbacks are compiled in and registered at startup: if the name is unknown now,
+		// it will never appear, so reject instead of creating a breakpoint that never fires.
+		if (!callbackDefinition) {
+			DEBUG_ShowMsg("DEBUG: No compiled callback named '%s'. Known callbacks: %s\n",callbackName.c_str(),DebugCallbackNames().c_str());
+			return true;
+		}
+
 		// Everything after the callback name is handed to the callback on every hit. Take the
 		// arguments from the ORIGINAL (non-upper-cased) input, so they keep their case (e.g.
 		// strings to compare against). Tokens are [RUNC] [component] [offset] [callback] [args...].
-		std::vector<std::string> callbackArgs;
+		// std::vector<std::string> callbackArgs;
+		Result<std::vector<std::string> > prepareResult;
 		{
 			std::istringstream originalStream(str);
 			string skip;
 			for (int tok = 0; tok < 4; tok++) originalStream >> skip;
-			for (string arg; originalStream >> arg; ) callbackArgs.push_back(arg);
-		}
 
-		// Callbacks are compiled in and registered at startup: if the name is unknown now,
-		// it will never appear, so reject instead of creating a breakpoint that never fires.
-		if (!DebugFindCallback(callbackName)) {
-			DEBUG_ShowMsg("DEBUG: No compiled callback named '%s'. Known callbacks: %s\n",callbackName.c_str(),DebugCallbackNames().c_str());
-			return true;
+			ScriptCallbackArgumentPreparer prepare = callbackDefinition->argumentPreparer;
+			prepareResult = prepare(originalStream);
+
+			if (!prepareResult.success) {
+				DEBUG_ShowMsg("Invalid arguments for %s\n", callbackName.c_str());
+				return true;
+			}
 		}
 
 		char *end;
@@ -3063,9 +3076,9 @@ bool ParseCommand(char* str) {
 		}
 
 		uint16_t csValue = SegValue(cs);
-		CBreakpoint::AddNativePoint(csValue, addressCalculationSuccess.value, callbackName, callbackArgs);
+		CBreakpoint::AddNativePoint(csValue, addressCalculationSuccess.value, callbackName, prepareResult.value);
 		string argList;
-		for (auto& a : callbackArgs) { if (!argList.empty()) argList += ", "; argList += a; }
+		for (auto& a : prepareResult.value) { if (!argList.empty()) argList += ", "; argList += a; }
 		DEBUG_ShowMsg("DEBUG: Set native scriptpoint at %X:%X -> %s(%s)\n", csValue, addressCalculationSuccess.value,
 		              callbackName.c_str(), argList.c_str());
 		DEBUG_ShowMsg("DEBUG: Remove it like any breakpoint with BPDEL (see BPLIST).\n");
@@ -3073,11 +3086,17 @@ bool ParseCommand(char* str) {
 	}
 
 	if (command == "RUNCLIST") { // List registered compiled-in callbacks
-		DEBUG_ShowMsg("Registered RUNC callbacks: %s\n",DebugCallbackNames().c_str());
+		std::map<std::string, DEBUG_CallbackDefinition>& callbacks = DebugCallbacks();
+		for (auto &callback: callbacks) {
+			const string &callbackName = callback.first;
+			DEBUG_CallbackDefinition &callbackDefinition = callback.second;
+			DEBUG_ShowMsg("%s: \t %s", callbackName.c_str(), callbackDefinition.description.c_str());
+		}
+
 		return true;
 	}
 
-	if (command == "HANDOFF") {
+	if (command == "HANDOFF" || command == "HANDOVER") {
 		Kernel *kernel = &componentContainer.kernel;
 		uint32_t kernelHookOffset = kernel->hookAddress - kernel->baseAddress;
 
@@ -4826,9 +4845,17 @@ bool ParseCommand(char* str) {
 #endif
 		DEBUG_ShowMsg("BPLIST                    - List breakpoints.\n");
 		DEBUG_ShowMsg("BPDEL  [bpNr] / *         - Delete breakpoint nr / all.\n");
+#if C_HEAVY_DEBUG
+		DEBUG_ShowMsg("RUNCLIST  [bpNr] / *      - List native breakpoint functions available.\n");
+#endif
 		DEBUG_ShowMsg("C / D  [segment]:[offset] - Set code / data view address.\n");
 		DEBUG_ShowMsg("DV [addr]                 - Set data view to linear (virtual) address\n");
 		DEBUG_ShowMsg("DP [addr]                 - Set data view to physical address\n");
+#if C_HEAVY_DEBUG
+		DEBUG_ShowMsg("DRP4 [segment]:[offset]   - Set data view to pointer at segment:offset\n");
+		DEBUG_ShowMsg("DRPC [component]:[offset] - De-references a four-byte pointer relative to the given component and displays it in data view.\n");
+		DEBUG_ShowMsg("DC [component] [offset]   - Set data view to address to offset relative to component\n");
+#endif
 		DEBUG_ShowMsg("DOS MCBS                  - Show Memory Control Block chain.\n");
 		DEBUG_ShowMsg("DOS KERN                  - Show DOS kernel memory blocks.\n");
 		DEBUG_ShowMsg("DOS XMS                   - Show XMS memory handles.\n");
@@ -5136,23 +5163,23 @@ Result<uint32_t> calculateAddressRelativeToComponent(string &componentName, cons
 	const auto it = componentContainer.components.find(componentName);
 	if (it == componentContainer.components.end()) {
 		LOG_MSG("DEBUG: Unknown component: %s\n", componentName.c_str());
-		return Result<uint32_t>{0, false};
+		return Result<uint32_t>{false, 0};
 	}
 
 	auto component = it->second;
 	if (!component.isLoadAddressSet) {
 		LOG_MSG("DEBUG: Component %s is not loaded\n", componentName.c_str());
-		return Result<uint32_t>{0, false};
+		return Result<uint32_t>{false, 0};
 	}
 
 	if (ofs < component.baseAddress || ofs > component.baseAddress + component.length) {
 		LOG_MSG("DEBUG: Address %s out of range for component %s [%X:%X]\n", offsetString.c_str(),
 			componentName.c_str(), component.baseAddress, component.baseAddress + component.length);
-		return Result<uint32_t>{0, false};
+		return Result<uint32_t>{false, 0};
 	}
 
 	auto absoluteOffset = component.loadAddress + (ofs - component.baseAddress);
-	return Result<uint32_t>{absoluteOffset, true};
+	return Result<uint32_t>{true, absoluteOffset};
 }
 
 #endif

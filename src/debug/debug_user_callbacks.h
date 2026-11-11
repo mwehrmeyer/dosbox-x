@@ -16,18 +16,9 @@
 #include <fstream>
 #include <list>
 
+#include "debug.h"
+
 void DEBUG_ShowMsg(char const* format,...);
-
-template<typename T>
-struct Result {
-    T value;
-    bool success;
-};
-
-template <>
-struct Result<void> {
-    bool success;
-};
 
 template <
     typename T,
